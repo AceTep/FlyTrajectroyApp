@@ -53,19 +53,14 @@ class CSVFilterApp(QWidget):
             try:
                 all_data = []
                 for file_path in file_paths:
-                    # Read the individual CSV and add a 'fly_id' column to distinguish each fly
                     df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"], nrows=1000)
-                    fly_id = file_path.split("/")[-1].split(".")[0]  # Take the filename as the fly ID
+                    fly_id = file_path.split("/")[-1].split(".")[0]
                     df["fly_id"] = fly_id
                     all_data.append(df)
 
-                # Concatenate all dataframes
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
-
-                # Preview data
                 self.text_preview.setPlainText(str(self.all_flies_df.head()))
 
-                # Enable buttons
                 self.save_button.setEnabled(True)
                 self.plot_button.setEnabled(True)
                 self.video_button.setEnabled(True)
@@ -100,87 +95,108 @@ class CSVFilterApp(QWidget):
             plt.title("Fly Trajectories")
             plt.xlabel("Position X")
             plt.ylabel("Position Y")
-            plt.gca().invert_yaxis()  # Match image orientation if needed
+            plt.gca().invert_yaxis()
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
             plt.show()
         except Exception as e:
             QMessageBox.critical(self, "Plot Error", f"Failed to plot fly paths:\n{str(e)}")
-
     def generate_video(self):
         if self.all_flies_df is None:
             return
 
         try:
+            video_path, _ = QFileDialog.getOpenFileName(self, "Select Background Video", "", "Video Files (*.mp4 *.avi *.mov)")
+            if not video_path:
+                return
+
             start_time = time.time()
 
-            frame_width, frame_height = 640, 480
-            center_x, center_y = frame_width // 2, frame_height // 2
-            output_video_path = "flies_tracking_video.mp4"
-            fps = 24
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            video = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                QMessageBox.critical(self, "Error", "Failed to open video file.")
+                return
 
-            unique_flies = self.all_flies_df["fly_id"].unique()
+            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            output_path = "overlayed_fly_video.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+
             fly_data = {
                 fly_id: df.reset_index(drop=True)
                 for fly_id, df in self.all_flies_df.groupby("fly_id")
             }
 
             min_rows = min(len(df) for df in fly_data.values())
+            max_frames = min(min_rows, total_frames)
 
-            fly_colors = {
-                fly_id: tuple(int(c) for c in np.random.randint(0, 255, 3))
-                for fly_id in unique_flies
+            # Bounding box for scaling
+            all_x = self.all_flies_df["pos x"].values
+            all_y = self.all_flies_df["pos y"].values
+            min_x, max_x = all_x.min(), all_x.max()
+            min_y, max_y = all_y.min(), all_y.max()
+
+            bbox_width = max_x - min_x
+            bbox_height = max_y - min_y
+
+            scale = 0.9 * min(frame_width / bbox_width, frame_height / bbox_height)
+            offset_x = (frame_width - scale * bbox_width) / 2
+            offset_y = (frame_height - scale * bbox_height) / 2
+
+            # Precompute transformed positions for all flies
+            transformed_positions = {
+                fly_id: np.stack([
+                    ((df["pos x"].values - min_x) * scale + offset_x),
+                    ((df["pos y"].values - min_y) * scale + offset_y),
+                    df["ori"].values
+                ], axis=1)
+                for fly_id, df in fly_data.items()
             }
 
-            for i in range(min_rows):
-                frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+            # Assign random colors to each fly
+            fly_colors = {
+                fly_id: tuple(int(c) for c in np.random.randint(0, 255, 3))
+                for fly_id in fly_data.keys()
+            }
 
-                # Compute average position for centering
-                all_x = []
-                all_y = []
-                for df in fly_data.values():
-                    row = df.iloc[i]
-                    all_x.append(row["pos x"])
-                    all_y.append(row["pos y"])
-                avg_x = np.mean(all_x)
-                avg_y = np.mean(all_y)
+            frame_idx = 0
+            while cap.isOpened() and frame_idx < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-                for fly_id, df in fly_data.items():
-                    row = df.iloc[i]
+                for fly_id, coords in transformed_positions.items():
+                    if frame_idx >= len(coords):
+                        continue
 
-                    # Translate position to center flies
-                    raw_x = row["pos x"]
-                    raw_y = row["pos y"]
-                    x = int(center_x + (raw_x - avg_x))
-                    y = int(center_y + (raw_y - avg_y))
-
-                    # Clamp to screen
-                    x = int(min(max(x, 0), frame_width - 1))
-                    y = int(min(max(y, 0), frame_height - 1))
-
-                    ori = row["ori"]
+                    x, y, ori = coords[frame_idx]
+                    x = int(x)
+                    y = int(y)
                     dx = int(15 * np.cos(ori))
                     dy = int(15 * np.sin(ori))
-
                     color = fly_colors[fly_id]
 
-                    cv2.circle(frame, (x, y), 5, color, -1)
-                    cv2.arrowedLine(frame, (x, y), (x + dx, y + dy), (255, 255, 0), 2)
-                    cv2.putText(frame, fly_id, (x + 10, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    cv2.circle(frame, (x, y), 10, color, -1)
+                    cv2.line(frame, (x, y), (x + dx, y + dy), (255, 255, 0), 2)
 
-                video.write(frame)
+                    # Optional: enable to draw fly ID text 
+                    # cv2.putText(frame, fly_id, (x + 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-            video.release()
+                out.write(frame)
+                frame_idx += 1
+
+            cap.release()
+            out.release()
             elapsed_time = time.time() - start_time
-            QMessageBox.information(self, "Success", f"Video saved to: {output_video_path}\nTime taken: {elapsed_time:.2f} seconds")
+            QMessageBox.information(self, "Success", f"Video saved to: {output_path}\nTime taken: {elapsed_time:.2f} seconds")
 
         except Exception as e:
-            QMessageBox.critical(self, "Video Error", f"Failed to generate video:\n{str(e)}")
-
+            QMessageBox.critical(self, "Video Error", f"Failed to generate overlay video:\n{str(e)}")
 
 
 if __name__ == "__main__":
