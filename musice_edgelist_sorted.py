@@ -32,13 +32,13 @@ PREDEFINED_COLORS = [
     (128, 128, 0),     # Olive
     (128, 0, 0),       # Maroon
     (0, 128, 0),       # Dark green
-    (75, 0, 130),      # Indigo
     (199, 21, 133),    # Medium Violet Red
     (210, 105, 30),    # Chocolate
     (255, 192, 203),   # Pink
     (70, 130, 180),    # Steel Blue
     (154, 205, 50),    # Yellow Green
-    (139, 69, 19)      # Saddle Brown
+    (139, 69, 19),      # Saddle Brown
+    (75, 0, 130),      # Indigo
 ]
 
 
@@ -160,31 +160,36 @@ class VideoProcessingThread(QThread):
                             if frame_idx < len(transformed_positions[fly1]) and frame_idx < len(transformed_positions[fly2]):
                                 x1, y1, _ = transformed_positions[fly1][frame_idx]
                                 x2, y2, _ = transformed_positions[fly2][frame_idx]
-                                
-                                # Pointing from fly1 (initiator) to fly2 (receiver)
-                                pt1 = (int(x1), int(y1))  # Start position of fly1
-                                pt2 = (int(x2), int(y2))  # End position of fly2
 
-                                # Compute the direction of the arrow (toward fly2 from fly1)
-                                dx = int(x2 - x1)
-                                dy = int(y2 - y1)
-                                arrow_length = 30  # Adjust this length for the arrowhead
-                                angle = np.arctan2(dy, dx)  # Angle between fly1 and fly2
+                                pt1 = (int(x1), int(y1))
+                                pt2 = (int(x2), int(y2))
 
-                                # Calculate the arrowhead points
-                                arrow_dx1 = int(arrow_length * np.cos(angle - np.pi / 6))
-                                arrow_dy1 = int(arrow_length * np.sin(angle - np.pi / 6))
-                                arrow_dx2 = int(arrow_length * np.cos(angle + np.pi / 6))
-                                arrow_dy2 = int(arrow_length * np.sin(angle + np.pi / 6))
+                                # Draw the interaction arrow
+                                cv2.arrowedLine(frame, pt1, pt2, (0, 0, 0), 4, tipLength=0.1)
 
-                                # Arrow from fly1 to fly2
-                                cv2.arrowedLine(frame, pt1, pt2, (0, 0, 255), 4, tipLength=0.1)
-
-                                # Optionally, add a label near the arrow for fly1 and fly2
+                                # Draw fly labels
                                 cv2.putText(frame, f'Fly {fly1}', (int(x1 + 10), int(y1 - 10)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                                 cv2.putText(frame, f'Fly {fly2}', (int(x2 + 10), int(y2 - 10)),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+                                # Compute a bounding box that includes both flies
+                                margin = 60  # adjustable margin in pixels
+
+                                min_x_box = int(min(x1, x2) - margin)
+                                max_x_box = int(max(x1, x2) + margin)
+                                min_y_box = int(min(y1, y2) - margin)
+                                max_y_box = int(max(y1, y2) + margin)
+
+                                # Clamp values to image boundaries
+                                min_x_box = max(0, min_x_box)
+                                max_x_box = min(frame.shape[1], max_x_box)
+                                min_y_box = max(0, min_y_box)
+                                max_y_box = min(frame.shape[0], max_y_box)
+
+                                # Draw rectangle
+                                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), (0, 255, 255), 3)
+
 
 
                 out.write(frame)
@@ -390,7 +395,6 @@ class CSVFilterApp(QWidget):
                     self.fly_colors[fly_id] = PREDEFINED_COLORS[idx % len(PREDEFINED_COLORS)]
 
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
-                self.text_preview.setPlainText(str(self.all_flies_df.head()))
 
                 if self.video_path and self.edgelist_path:
                     self.video_button.setEnabled(True)
@@ -398,6 +402,7 @@ class CSVFilterApp(QWidget):
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load CSVs:\n{str(e)}")
+
 
     def load_video(self):
         video_path, _ = QFileDialog.getOpenFileName(self, "Select Background Video", "", "Video Files (*.mp4 *.avi *.mov)")
