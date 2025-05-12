@@ -11,7 +11,7 @@ from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
     QFileDialog, QTextEdit, QMessageBox, QProgressDialog,
-    QHBoxLayout, QStyle
+    QHBoxLayout, QStyle,QSlider, QLabel
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
@@ -107,14 +107,20 @@ class VideoProcessingThread(QThread):
             offset_x = (frame_width - scale * bbox_width) / 2
             offset_y = (frame_height - scale * bbox_height) / 2
 
-            transformed_positions = {
-                fly_id: np.stack([
-                    ((df["pos x"].values - min_x) * scale + offset_x),
-                    ((df["pos y"].values - min_y) * scale + offset_y),
-                    df["ori"].values
-                ], axis=1)
-                for fly_id, df in fly_data.items()
-            }
+            center_x = frame_width / 2
+            center_y = frame_height / 2
+
+            transformed_positions = {}
+            for fly_id, df in fly_data.items():
+                x = (df["pos x"].values - min_x) * scale + offset_x
+                y = (df["pos y"].values - min_y) * scale + offset_y
+                ori = df["ori"].values
+
+                # Shift 20 pixels toward center
+                x += np.sign(center_x - x) * 35
+                y += np.sign(center_y - y) * 35
+
+                transformed_positions[fly_id] = np.stack([x, y, ori], axis=1)
 
             interactions = self.parse_edgelist(self.edgelist_path) if self.edgelist_path else []
 
@@ -133,11 +139,20 @@ class VideoProcessingThread(QThread):
                     dx = int(15 * np.cos(ori))
                     dy = int(15 * np.sin(ori))
                     color = self.fly_colors.get(fly_id, (255, 255, 255))
+                    
+                    arrow_length = 40  # you can adjust this length to control arrow size
+                    # Arrow vector based on orientation
+                    dx = int(arrow_length * np.cos(ori))
+                    dy = int(-arrow_length * np.sin(ori))  # <-- Flip Y direction
 
-                    cv2.circle(frame, (x, y), 25, color, -1)
-                    cv2.line(frame, (x, y), (x + dx, y + dy), (255, 255, 0), 2)
+                    color = self.fly_colors.get(fly_id, (255, 255, 255))  # default white
+
+                    pt1 = (x, y)
+                    pt2 = (x + dx, y + dy)
+                    cv2.arrowedLine(frame, pt1, pt2, color, 10, tipLength=0.3)
                     cv2.putText(frame, str(fly_id), (x + 10, y - 10),
-                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
 
                 for (start, end, fly1, fly2) in interactions:
                     if start <= frame_idx <= end:
@@ -145,9 +160,32 @@ class VideoProcessingThread(QThread):
                             if frame_idx < len(transformed_positions[fly1]) and frame_idx < len(transformed_positions[fly2]):
                                 x1, y1, _ = transformed_positions[fly1][frame_idx]
                                 x2, y2, _ = transformed_positions[fly2][frame_idx]
-                                pt1 = (int(x1), int(y1))
-                                pt2 = (int(x2), int(y2))
-                                cv2.line(frame, pt1, pt2, (0, 0, 255), 2)
+                                
+                                # Pointing from fly1 (initiator) to fly2 (receiver)
+                                pt1 = (int(x1), int(y1))  # Start position of fly1
+                                pt2 = (int(x2), int(y2))  # End position of fly2
+
+                                # Compute the direction of the arrow (toward fly2 from fly1)
+                                dx = int(x2 - x1)
+                                dy = int(y2 - y1)
+                                arrow_length = 30  # Adjust this length for the arrowhead
+                                angle = np.arctan2(dy, dx)  # Angle between fly1 and fly2
+
+                                # Calculate the arrowhead points
+                                arrow_dx1 = int(arrow_length * np.cos(angle - np.pi / 6))
+                                arrow_dy1 = int(arrow_length * np.sin(angle - np.pi / 6))
+                                arrow_dx2 = int(arrow_length * np.cos(angle + np.pi / 6))
+                                arrow_dy2 = int(arrow_length * np.sin(angle + np.pi / 6))
+
+                                # Arrow from fly1 to fly2
+                                cv2.arrowedLine(frame, pt1, pt2, (0, 0, 255), 4, tipLength=0.1)
+
+                                # Optionally, add a label near the arrow for fly1 and fly2
+                                cv2.putText(frame, f'Fly {fly1}', (int(x1 + 10), int(y1 - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                                cv2.putText(frame, f'Fly {fly2}', (int(x2 + 10), int(y2 - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
 
                 out.write(frame)
                 progress = int((frame_idx / max_frames) * 100)
@@ -162,7 +200,6 @@ class VideoProcessingThread(QThread):
         except Exception as e:
             self.update_progress.emit(f"Error: {str(e)}")
 
-
 class VideoPlayerWindow(QWidget):
     def __init__(self, video_path):
         super().__init__()
@@ -172,10 +209,13 @@ class VideoPlayerWindow(QWidget):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
+        # Video widget
         self.video_widget = QVideoWidget()
         layout.addWidget(self.video_widget)
 
+        # Control layout for buttons and playback bar
         control_layout = QHBoxLayout()
+
         self.play_button = QPushButton()
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.play_button.clicked.connect(self.play_video)
@@ -188,15 +228,43 @@ class VideoPlayerWindow(QWidget):
         self.stop_button.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
         self.stop_button.clicked.connect(self.stop_video)
 
+
+        self.fullscreen_button = QPushButton("Fullscreen")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+    
+        self.skip_back_button = QPushButton("<<")
+        self.skip_back_button.clicked.connect(self.skip_back)
+
+        self.skip_forward_button = QPushButton(">>")
+        self.skip_forward_button.clicked.connect(self.skip_forward)
+
         control_layout.addWidget(self.play_button)
         control_layout.addWidget(self.pause_button)
         control_layout.addWidget(self.stop_button)
+        control_layout.addWidget(self.skip_back_button)
+        control_layout.addWidget(self.skip_forward_button)
+        control_layout.addWidget(self.fullscreen_button)
 
+        # Add control layout to the main layout
         layout.addLayout(control_layout)
 
+        # Add playback slider (QSlider)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, 100)
+        self.slider.setTickPosition(QSlider.TicksBelow)
+        self.slider.setTickInterval(10)
+        self.slider.valueChanged.connect(self.seek_video)
+        layout.addWidget(self.slider)
+
+        # Media player
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
         self.media_player.setVideoOutput(self.video_widget)
 
+        # Connect to media player signals
+        self.media_player.positionChanged.connect(self.update_slider_position)
+        self.media_player.durationChanged.connect(self.update_slider_range)
+
+        # Load the video
         url = QUrl.fromLocalFile(os.path.abspath(video_path))
         self.media_player.setMedia(QMediaContent(url))
 
@@ -209,7 +277,35 @@ class VideoPlayerWindow(QWidget):
     def stop_video(self):
         self.media_player.stop()
 
+    def skip_back(self):
+        # Skip backward 5 seconds
+        current_pos = self.media_player.position()
+        new_pos = max(0, current_pos - 5000)  # 5000 milliseconds = 5 seconds
+        self.media_player.setPosition(new_pos)
 
+    def skip_forward(self):
+        # Skip forward 5 seconds
+        current_pos = self.media_player.position()
+        new_pos = min(self.media_player.duration(), current_pos + 5000)  # 5000 milliseconds = 5 seconds
+        self.media_player.setPosition(new_pos)
+
+    def seek_video(self, position):
+        # Jump to the selected position in the slider
+        self.media_player.setPosition(position)
+
+    def update_slider_position(self, position):
+        # Update the slider position during playback
+        self.slider.setValue(position)
+
+    def update_slider_range(self, duration):
+        # Update slider range when the video is loaded
+        self.slider.setRange(0, duration)
+
+    def toggle_fullscreen(self):
+            if self.isFullScreen():
+                self.showNormal()  # Go back to windowed mode
+            else:
+                self.showFullScreen()  # Switch to fullscreen mode
 class CSVFilterApp(QWidget):
     def __init__(self):
         super().__init__()
