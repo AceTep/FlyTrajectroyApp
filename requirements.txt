@@ -1,0 +1,7 @@
+PyQt5==5.15.10
+PyQt5-sip==12.13.0
+PyQt5-Qt5==5.15.2
+opencv-python==4.8.0.76
+numpy==1.24.4
+pandas==1.5.3
+matplotlib==3.7.1
