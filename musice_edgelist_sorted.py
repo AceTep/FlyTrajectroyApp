@@ -6,8 +6,7 @@ import numpy as np
 import time
 import csv
 import os
-import subprocess
-import platform
+
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
@@ -18,16 +17,42 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 
 
+# Define a fixed list of 20 RGB color tuples
+PREDEFINED_COLORS = [
+    (255, 0, 0),       # Red
+    (0, 255, 0),       # Green
+    (0, 0, 255),       # Blue
+    (255, 255, 0),     # Yellow
+    (255, 0, 255),     # Magenta
+    (0, 255, 255),     # Cyan
+    (255, 165, 0),     # Orange
+    (128, 0, 128),     # Purple
+    (0, 128, 128),     # Teal
+    (0, 0, 128),       # Navy
+    (128, 128, 0),     # Olive
+    (128, 0, 0),       # Maroon
+    (0, 128, 0),       # Dark green
+    (75, 0, 130),      # Indigo
+    (199, 21, 133),    # Medium Violet Red
+    (210, 105, 30),    # Chocolate
+    (255, 192, 203),   # Pink
+    (70, 130, 180),    # Steel Blue
+    (154, 205, 50),    # Yellow Green
+    (139, 69, 19)      # Saddle Brown
+]
+
+
 class VideoProcessingThread(QThread):
     update_progress = pyqtSignal(str)
     update_progress_bar = pyqtSignal(int)
     video_saved = pyqtSignal(str, float)
 
-    def __init__(self, all_flies_df, video_path, edgelist_path=None):
+    def __init__(self, all_flies_df, video_path, edgelist_path=None, fly_colors=None):
         super().__init__()
         self.all_flies_df = all_flies_df
         self.video_path = video_path
         self.edgelist_path = edgelist_path
+        self.fly_colors = fly_colors or {}
 
     def parse_edgelist(self, path):
         interactions = []
@@ -91,11 +116,6 @@ class VideoProcessingThread(QThread):
                 for fly_id, df in fly_data.items()
             }
 
-            fly_colors = {
-                fly_id: tuple(int(c) for c in np.random.randint(0, 255, 3))
-                for fly_id in fly_data.keys()
-            }
-
             interactions = self.parse_edgelist(self.edgelist_path) if self.edgelist_path else []
 
             frame_idx = 0
@@ -112,12 +132,12 @@ class VideoProcessingThread(QThread):
                     y = int(y)
                     dx = int(15 * np.cos(ori))
                     dy = int(15 * np.sin(ori))
-                    color = fly_colors[fly_id]
+                    color = self.fly_colors.get(fly_id, (255, 255, 255))
 
                     cv2.circle(frame, (x, y), 25, color, -1)
                     cv2.line(frame, (x, y), (x + dx, y + dy), (255, 255, 0), 2)
                     cv2.putText(frame, str(fly_id), (x + 10, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
 
                 for (start, end, fly1, fly2) in interactions:
                     if start <= frame_idx <= end:
@@ -198,60 +218,80 @@ class CSVFilterApp(QWidget):
 
         self.layout = QVBoxLayout()
 
+        # Horizontal layout for 2 columns
+        button_table_layout = QHBoxLayout()
+
+        # Left column (3 buttons)
+        left_column = QVBoxLayout()
         self.load_button = QPushButton("Load Fly CSVs")
         self.load_button.clicked.connect(self.load_csv)
-        self.layout.addWidget(self.load_button)
+        left_column.addWidget(self.load_button)
 
         self.load_video_button = QPushButton("Load Background Video")
         self.load_video_button.clicked.connect(self.load_video)
-        self.layout.addWidget(self.load_video_button)
+        left_column.addWidget(self.load_video_button)
 
         self.load_edgelist_button = QPushButton("Load Edgelist CSV")
         self.load_edgelist_button.clicked.connect(self.load_edgelist)
-        self.layout.addWidget(self.load_edgelist_button)
+        left_column.addWidget(self.load_edgelist_button)
 
+        # Right column (3 buttons)
+        right_column = QVBoxLayout()
         self.plot_button = QPushButton("Plot Fly Paths")
         self.plot_button.clicked.connect(self.plot_fly_paths)
         self.plot_button.setEnabled(False)
-        self.layout.addWidget(self.plot_button)
+        right_column.addWidget(self.plot_button)
 
         self.video_button = QPushButton("Generate Video")
         self.video_button.clicked.connect(self.generate_video)
         self.video_button.setEnabled(False)
-        self.layout.addWidget(self.video_button)
+        right_column.addWidget(self.video_button)
 
         self.play_button = QPushButton("Play Video")
         self.play_button.setEnabled(False)
         self.play_button.clicked.connect(self.play_embedded_video)
-        self.layout.addWidget(self.play_button)
+        right_column.addWidget(self.play_button)
 
+        # Combine both columns in the horizontal layout
+        button_table_layout.addLayout(left_column)
+        button_table_layout.addLayout(right_column)
+
+        self.layout.addLayout(button_table_layout)
+
+        # Text area for data preview
         self.text_preview = QTextEdit()
         self.text_preview.setReadOnly(True)
         self.layout.addWidget(self.text_preview)
 
         self.setLayout(self.layout)
 
+        # Internal state
         self.all_flies_df = None
         self.video_path = None
         self.edgelist_path = None
         self.generated_video_path = None
+        self.fly_colors = {}
 
+        # Progress dialog
         self.progress_dialog = QProgressDialog("Processing video...", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowTitle("Video Progress")
         self.progress_dialog.setWindowModality(Qt.WindowModal)
         self.progress_dialog.setCancelButton(None)
         self.progress_dialog.reset()
 
+
     def load_csv(self):
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Fly CSV Files", "", "CSV Files (*.csv)")
         if file_paths:
             try:
                 all_data = []
-                for file_path in file_paths:
+                self.fly_colors.clear()
+                for idx, file_path in enumerate(file_paths):
                     df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"], nrows=1000)
                     fly_id = os.path.splitext(os.path.basename(file_path))[0]
                     df["fly_id"] = fly_id
                     all_data.append(df)
+                    self.fly_colors[fly_id] = PREDEFINED_COLORS[idx % len(PREDEFINED_COLORS)]
 
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
                 self.text_preview.setPlainText(str(self.all_flies_df.head()))
@@ -286,7 +326,9 @@ class CSVFilterApp(QWidget):
             unique_flies = self.all_flies_df["fly_id"].unique()
             for fly_id in unique_flies:
                 fly_df = self.all_flies_df[self.all_flies_df["fly_id"] == fly_id]
-                plt.plot(fly_df["pos x"], fly_df["pos y"], marker="o", markersize=2, linestyle='-', label=fly_id)
+                color = np.array(self.fly_colors.get(fly_id, (0, 0, 0))) / 255.0
+                plt.plot(fly_df["pos x"], fly_df["pos y"], marker="o", markersize=2,
+                         linestyle='-', label=fly_id, color=color)
 
             plt.title("Fly Trajectories")
             plt.xlabel("Position X")
@@ -307,7 +349,9 @@ class CSVFilterApp(QWidget):
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
 
-        self.video_thread = VideoProcessingThread(self.all_flies_df, self.video_path, self.edgelist_path)
+        self.video_thread = VideoProcessingThread(
+            self.all_flies_df, self.video_path, self.edgelist_path, self.fly_colors
+        )
         self.video_thread.update_progress.connect(self.show_progress)
         self.video_thread.update_progress_bar.connect(self.progress_dialog.setValue)
         self.video_thread.video_saved.connect(self.show_video_saved)
