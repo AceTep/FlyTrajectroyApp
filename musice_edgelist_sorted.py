@@ -11,34 +11,20 @@ from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
     QFileDialog, QTextEdit, QMessageBox, QProgressDialog,
-    QHBoxLayout, QStyle,QSlider, QLabel
+    QHBoxLayout, QStyle, QSlider, QLabel
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
+from collections import defaultdict, deque
 
 
-# Define a fixed list of 20 RGB color tuples
+# ===== Constants =====
 PREDEFINED_COLORS = [
-    (255, 0, 0),       # Red
-    (0, 255, 0),       # Green
-    (0, 0, 255),       # Blue
-    (255, 255, 0),     # Yellow
-    (255, 0, 255),     # Magenta
-    (0, 255, 255),     # Cyan
-    (255, 165, 0),     # Orange
-    (128, 0, 128),     # Purple
-    (0, 128, 128),     # Teal
-    (0, 0, 128),       # Navy
-    (128, 128, 0),     # Olive
-    (128, 0, 0),       # Maroon
-    (0, 128, 0),       # Dark green
-    (199, 21, 133),    # Medium Violet Red
-    (210, 105, 30),    # Chocolate
-    (255, 192, 203),   # Pink
-    (70, 130, 180),    # Steel Blue
-    (154, 205, 50),    # Yellow Green
-    (139, 69, 19),      # Saddle Brown
-    (75, 0, 130),      # Indigo
+    (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+    (255, 0, 255), (0, 255, 255), (255, 165, 0), (128, 0, 128),
+    (0, 128, 128), (0, 0, 128), (128, 128, 0), (128, 0, 0),
+    (0, 128, 0), (199, 21, 133), (210, 105, 30), (255, 192, 203),
+    (70, 130, 180), (154, 205, 50), (139, 69, 19), (75, 0, 130),
 ]
 
 
@@ -65,63 +51,121 @@ class VideoProcessingThread(QThread):
                     node_1 = row["node_1"]
                     node_2 = row["node_2"]
                     interactions.append((start, end, node_1, node_2))
-                except Exception:
-                    continue
+                except Exception as e:
+                    print(f"Skipping row due to error: {e}")
         return sorted(interactions, key=lambda x: x[0])
+
+    def get_video_info(self, cap):
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        return width, height, fps, total_frames
+
+    def transform_fly_positions(self, frame_width, frame_height):
+        fly_data = {
+            fly_id: df.reset_index(drop=True)
+            for fly_id, df in self.all_flies_df.groupby("fly_id")
+        }
+
+        all_x = self.all_flies_df["pos x"].values
+        all_y = self.all_flies_df["pos y"].values
+        min_x, max_x = all_x.min(), all_x.max()
+        min_y, max_y = all_y.min(), all_y.max()
+
+        scale = 0.9 * min(frame_width / (max_x - min_x), frame_height / (max_y - min_y))
+        offset_x = (frame_width - scale * (max_x - min_x)) / 2
+        offset_y = (frame_height - scale * (max_y - min_y)) / 2
+        center_x, center_y = frame_width / 2, frame_height / 2
+
+        transformed = {}
+        for fly_id, df in fly_data.items():
+            x = (df["pos x"].values - min_x) * scale + offset_x
+            y = (df["pos y"].values - min_y) * scale + offset_y
+            ori = df["ori"].values
+            x += np.sign(center_x - x) * 35
+            y += np.sign(center_y - y) * 35
+            transformed[fly_id] = np.stack([x, y, ori], axis=1)
+
+        return transformed, min(len(df) for df in fly_data.values())
+
+    def draw_fly_arrows(self, frame, frame_idx, transformed_positions):
+        for fly_id, coords in transformed_positions.items():
+            if frame_idx >= len(coords):
+                continue
+            x, y, ori = coords[frame_idx]
+            x, y = int(x), int(y)
+            dx = int(40 * np.cos(ori))
+            dy = int(-40 * np.sin(ori))
+            color = self.fly_colors.get(fly_id, (255, 255, 255))
+            cv2.arrowedLine(frame, (x, y), (x + dx, y + dy), color, 10, tipLength=0.3)
+            cv2.putText(frame, str(fly_id), (x + 10, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+    def draw_interactions(self, frame, frame_idx, interactions, transformed_positions):
+        adjacency = defaultdict(set)
+        for (start, end, fly1, fly2) in interactions:
+            if start <= frame_idx <= end:
+                adjacency[fly1].add(fly2)
+                adjacency[fly2].add(fly1)
+
+        visited = set()
+        components = []
+
+        for fly in adjacency:
+            if fly not in visited:
+                group = set()
+                queue = deque([fly])
+                while queue:
+                    current = queue.popleft()
+                    if current not in visited:
+                        visited.add(current)
+                        group.add(current)
+                        queue.extend(adjacency[current] - visited)
+                components.append(group)
+
+        for group in components:
+            xs, ys = [], []
+            group_list = list(group)
+            for i in range(len(group_list)):
+                fly_id = group_list[i]
+                if fly_id in transformed_positions and frame_idx < len(transformed_positions[fly_id]):
+                    x1, y1, _ = transformed_positions[fly_id][frame_idx]
+                    xs.append(x1)
+                    ys.append(y1)
+                    for j in range(i + 1, len(group_list)):
+                        fly2 = group_list[j]
+                        if fly2 in transformed_positions and frame_idx < len(transformed_positions[fly2]):
+                            x2, y2, _ = transformed_positions[fly2][frame_idx]
+                            pt1 = (int(x1), int(y1))
+                            pt2 = (int(x2), int(y2))
+                            cv2.arrowedLine(frame, pt1, pt2, (0, 0, 0), 4, tipLength=0.1)
+
+            if xs and ys:
+                margin = 60
+                min_x_box = max(0, int(min(xs) - margin))
+                max_x_box = min(frame.shape[1], int(max(xs) + margin))
+                min_y_box = max(0, int(min(ys) - margin))
+                max_y_box = min(frame.shape[0], int(max(ys) + margin))
+                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), (0, 255, 255), 3)
+
+
 
     def run(self):
         try:
             start_time = time.time()
-
             cap = cv2.VideoCapture(self.video_path)
             if not cap.isOpened():
                 self.update_progress.emit("Failed to open video file.")
                 return
 
-            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_width, frame_height, fps, total_frames = self.get_video_info(cap)
+            out = cv2.VideoWriter("overlayed_fly_video_sorted.mp4",
+                                  cv2.VideoWriter_fourcc(*"mp4v"), fps, (frame_width, frame_height))
 
-            output_path = "overlayed_fly_video_sorted.mp4"
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
-
-            fly_data = {
-                fly_id: df.reset_index(drop=True)
-                for fly_id, df in self.all_flies_df.groupby("fly_id")
-            }
-
-            min_rows = min(len(df) for df in fly_data.values())
-            max_frames = min(min_rows, total_frames)
-
-            all_x = self.all_flies_df["pos x"].values
-            all_y = self.all_flies_df["pos y"].values
-            min_x, max_x = all_x.min(), all_x.max()
-            min_y, max_y = all_y.min(), all_y.max()
-
-            bbox_width = max_x - min_x
-            bbox_height = max_y - min_y
-
-            scale = 0.9 * min(frame_width / bbox_width, frame_height / bbox_height)
-            offset_x = (frame_width - scale * bbox_width) / 2
-            offset_y = (frame_height - scale * bbox_height) / 2
-
-            center_x = frame_width / 2
-            center_y = frame_height / 2
-
-            transformed_positions = {}
-            for fly_id, df in fly_data.items():
-                x = (df["pos x"].values - min_x) * scale + offset_x
-                y = (df["pos y"].values - min_y) * scale + offset_y
-                ori = df["ori"].values
-
-                # Shift 20 pixels toward center
-                x += np.sign(center_x - x) * 35
-                y += np.sign(center_y - y) * 35
-
-                transformed_positions[fly_id] = np.stack([x, y, ori], axis=1)
-
+            transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
+            max_frames = min(max_data_len, total_frames)
             interactions = self.parse_edgelist(self.edgelist_path) if self.edgelist_path else []
 
             frame_idx = 0
@@ -129,78 +173,15 @@ class VideoProcessingThread(QThread):
                 ret, frame = cap.read()
                 if not ret:
                     break
-
-                for fly_id, coords in transformed_positions.items():
-                    if frame_idx >= len(coords):
-                        continue
-                    x, y, ori = coords[frame_idx]
-                    x = int(x)
-                    y = int(y)
-                    dx = int(15 * np.cos(ori))
-                    dy = int(15 * np.sin(ori))
-                    color = self.fly_colors.get(fly_id, (255, 255, 255))
-                    
-                    arrow_length = 40  # you can adjust this length to control arrow size
-                    # Arrow vector based on orientation
-                    dx = int(arrow_length * np.cos(ori))
-                    dy = int(-arrow_length * np.sin(ori))  # <-- Flip Y direction
-
-                    color = self.fly_colors.get(fly_id, (255, 255, 255))  # default white
-
-                    pt1 = (x, y)
-                    pt2 = (x + dx, y + dy)
-                    cv2.arrowedLine(frame, pt1, pt2, color, 10, tipLength=0.3)
-                    cv2.putText(frame, str(fly_id), (x + 10, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
-
-
-                for (start, end, fly1, fly2) in interactions:
-                    if start <= frame_idx <= end:
-                        if fly1 in transformed_positions and fly2 in transformed_positions:
-                            if frame_idx < len(transformed_positions[fly1]) and frame_idx < len(transformed_positions[fly2]):
-                                x1, y1, _ = transformed_positions[fly1][frame_idx]
-                                x2, y2, _ = transformed_positions[fly2][frame_idx]
-
-                                pt1 = (int(x1), int(y1))
-                                pt2 = (int(x2), int(y2))
-
-                                # Draw the interaction arrow
-                                cv2.arrowedLine(frame, pt1, pt2, (0, 0, 0), 4, tipLength=0.1)
-
-                                # Draw fly labels
-                                cv2.putText(frame, f'Fly {fly1}', (int(x1 + 10), int(y1 - 10)),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                                cv2.putText(frame, f'Fly {fly2}', (int(x2 + 10), int(y2 - 10)),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-
-                                # Compute a bounding box that includes both flies
-                                margin = 60  # adjustable margin in pixels
-
-                                min_x_box = int(min(x1, x2) - margin)
-                                max_x_box = int(max(x1, x2) + margin)
-                                min_y_box = int(min(y1, y2) - margin)
-                                max_y_box = int(max(y1, y2) + margin)
-
-                                # Clamp values to image boundaries
-                                min_x_box = max(0, min_x_box)
-                                max_x_box = min(frame.shape[1], max_x_box)
-                                min_y_box = max(0, min_y_box)
-                                max_y_box = min(frame.shape[0], max_y_box)
-
-                                # Draw rectangle
-                                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), (0, 255, 255), 3)
-
-
-
+                self.draw_fly_arrows(frame, frame_idx, transformed_positions)
+                self.draw_interactions(frame, frame_idx, interactions, transformed_positions)
                 out.write(frame)
-                progress = int((frame_idx / max_frames) * 100)
-                self.update_progress_bar.emit(progress)
+                self.update_progress_bar.emit(int((frame_idx / max_frames) * 100))
                 frame_idx += 1
 
             cap.release()
             out.release()
-            elapsed_time = time.time() - start_time
-            self.video_saved.emit(output_path, elapsed_time)
+            self.video_saved.emit("overlayed_fly_video_sorted.mp4", time.time() - start_time)
 
         except Exception as e:
             self.update_progress.emit(f"Error: {str(e)}")
@@ -285,13 +266,13 @@ class VideoPlayerWindow(QWidget):
     def skip_back(self):
         # Skip backward 5 seconds
         current_pos = self.media_player.position()
-        new_pos = max(0, current_pos - 5000)  # 5000 milliseconds = 5 seconds
+        new_pos = max(0, current_pos - 5000)  
         self.media_player.setPosition(new_pos)
 
     def skip_forward(self):
         # Skip forward 5 seconds
         current_pos = self.media_player.position()
-        new_pos = min(self.media_player.duration(), current_pos + 5000)  # 5000 milliseconds = 5 seconds
+        new_pos = min(self.media_player.duration(), current_pos + 5000)  
         self.media_player.setPosition(new_pos)
 
     def seek_video(self, position):
@@ -388,7 +369,7 @@ class CSVFilterApp(QWidget):
                 all_data = []
                 self.fly_colors.clear()
                 for idx, file_path in enumerate(file_paths):
-                    df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"], nrows=1000)
+                    df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"], nrows=400)
                     fly_id = os.path.splitext(os.path.basename(file_path))[0]
                     df["fly_id"] = fly_id
                     all_data.append(df)
@@ -478,7 +459,6 @@ class CSVFilterApp(QWidget):
 
 if __name__ == "__main__":
     os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/path/to/your/qt/plugins/platforms"  # update only if needed
-
     app = QApplication(sys.argv)
     window = CSVFilterApp()
     window.show()
