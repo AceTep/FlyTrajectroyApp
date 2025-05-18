@@ -6,6 +6,7 @@ import numpy as np
 import time
 import csv
 import os
+import traceback
 from collections import defaultdict, deque
 
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
@@ -17,16 +18,15 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
+import hashlib
 
-
-PREDEFINED_COLORS = [
-    (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
-    (255, 0, 255), (0, 255, 255), (255, 165, 0), (128, 0, 128),
-    (0, 128, 128), (0, 0, 128), (128, 128, 0), (128, 0, 0),
-    (0, 128, 0), (199, 21, 133), (210, 105, 30), (255, 192, 203),
-    (70, 130, 180), (154, 205, 50), (139, 69, 19), (75, 0, 130),
-]
-
+def generate_fly_color(fly_id):
+    # Hash the fly_id to a consistent 6-digit hex
+    digest = hashlib.md5(fly_id.encode()).hexdigest()
+    r = int(digest[0:2], 16)
+    g = int(digest[2:4], 16)
+    b = int(digest[4:6], 16)
+    return (r, g, b)
 
 class VideoProcessingThread(QThread):
     update_progress = pyqtSignal(str)
@@ -34,7 +34,9 @@ class VideoProcessingThread(QThread):
     video_saved = pyqtSignal(str, float)
 
     def __init__(self, all_flies_df, video_path, edgelist_path=None, fly_colors=None,
-                 use_blank=False, draw_boxes=True, draw_labels=True, draw_arrows=True):
+             use_blank=False, draw_boxes=True, draw_labels=True, draw_arrows=True,
+             show_frame_counter=True):
+
         super().__init__()
         self.all_flies_df = all_flies_df
         self.video_path = video_path
@@ -44,6 +46,7 @@ class VideoProcessingThread(QThread):
         self.draw_boxes = draw_boxes
         self.draw_labels = draw_labels
         self.draw_arrows = draw_arrows
+        self.show_frame_counter = show_frame_counter
         self._is_cancelled = False
 
     def cancel(self):
@@ -85,65 +88,103 @@ class VideoProcessingThread(QThread):
         scale = 0.9 * min(frame_width / (max_x - min_x), frame_height / (max_y - min_y))
         offset_x = (frame_width - scale * (max_x - min_x)) / 2
         offset_y = (frame_height - scale * (max_y - min_y)) / 2
-        center_x, center_y = frame_width / 2, frame_height / 2
 
         transformed = {}
         for fly_id, df in fly_data.items():
             x = (df["pos x"].values - min_x) * scale + offset_x
             y = (df["pos y"].values - min_y) * scale + offset_y
             ori = df["ori"].values
-            x += np.sign(center_x - x) * 35
-            y += np.sign(center_y - y) * 35
             transformed[fly_id] = np.stack([x, y, ori], axis=1)
 
         return transformed, min(len(df) for df in fly_data.values())
 
     def run(self):
+        cap = None
+        out = None
         try:
             start_time = time.time()
-            cap = cv2.VideoCapture(self.video_path)
-            if not cap.isOpened():
-                self.update_progress.emit("Failed to open video.")
+
+            if self.use_blank:
+                cap = None
+                frame_width, frame_height = 3052,2304  # Default size for blank background
+                fps = 30
+                # Estimate frame count by minimum fly data length
+                transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
+                total_frames = max_data_len
+            else:
+                cap = cv2.VideoCapture(self.video_path)
+                if not cap.isOpened():
+                    self.update_progress.emit("Failed to open video.")
+                    return
+                frame_width, frame_height, fps, total_frames = self.get_video_info(cap)
+                transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
+
+            base_name = os.path.splitext(os.path.basename(self.video_path if self.video_path else "blank"))[0]
+            output_filename = f"{base_name}_overlay_fly.mp4"
+            out = cv2.VideoWriter(
+                output_filename,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps, (frame_width, frame_height)
+            )
+
+            if not out.isOpened():
+                self.update_progress.emit("Failed to create output video file.")
                 return
 
-            frame_width, frame_height, fps, total_frames = self.get_video_info(cap)
-            out = cv2.VideoWriter("overlayed_fly_video_sorted.mp4",
-                                  cv2.VideoWriter_fourcc(*"mp4v"), fps, (frame_width, frame_height))
-
-            transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
             max_frames = min(max_data_len, total_frames)
             interactions = self.parse_edgelist(self.edgelist_path) if self.edgelist_path else []
 
             frame_idx = 0
-            while cap.isOpened() and frame_idx < max_frames:
+            while frame_idx < max_frames:
                 if self._is_cancelled:
                     break
 
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
                 if self.use_blank:
-                    frame = np.ones_like(frame) * 255
+                    frame = np.ones((frame_height, frame_width, 3), dtype=np.uint8) * 255
+                    ret = True
+                else:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
                 self.draw_flies(frame, frame_idx, transformed_positions)
                 if self.draw_boxes:
                     self.draw_interaction_groups(frame, frame_idx, interactions, transformed_positions)
 
+                if self.show_frame_counter:
+                    self.draw_frame_counter(frame, frame_idx)
+
                 out.write(frame)
                 self.update_progress_bar.emit(int((frame_idx / max_frames) * 100))
                 frame_idx += 1
 
-            cap.release()
-            out.release()
             if self._is_cancelled:
                 self.update_progress.emit("Video generation cancelled.")
                 return
 
-            self.video_saved.emit("overlayed_fly_video_sorted.mp4", time.time() - start_time)
+            elapsed = time.time() - start_time
+            self.video_saved.emit(output_filename, elapsed)
 
         except Exception as e:
-            self.update_progress.emit(f"Error: {str(e)}")
+            error_message = f"Error: {str(e)}\n{traceback.format_exc()}"
+            self.update_progress.emit(error_message)
+
+        finally:
+            if cap is not None:
+                cap.release()
+            if out is not None:
+                out.release()
+
+    def draw_frame_counter(self, frame, frame_idx):
+        text = f"FRAMES: {frame_idx}"
+        position = (20, 40)  # Top-left corner
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        color = (0, 0, 0) if self.use_blank else (255, 255, 255)
+        thickness = 2
+        cv2.putText(frame, text, position, font, font_scale, color, thickness, cv2.LINE_AA)
+
+
 
     def draw_flies(self, frame, frame_idx, transformed_positions):
         label_color = (0, 0, 0) if self.use_blank else (255, 255, 255)
@@ -161,7 +202,8 @@ class VideoProcessingThread(QThread):
                 cv2.circle(frame, (x, y), 10, color, -1)
             if self.draw_labels:
                 cv2.putText(frame, str(fly_id), (x + 10, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
+
 
     def draw_interaction_groups(self, frame, frame_idx, interactions, transformed_positions):
         adjacency = defaultdict(set)
@@ -315,6 +357,8 @@ class CSVFilterApp(QWidget):
         self.draw_boxes = True
         self.show_labels = True
         self.draw_arrows = True
+        self.show_frame_counter = True
+
 
         self.progress_dialog = QProgressDialog("Processing video...", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowTitle("Video Progress")
@@ -334,10 +378,13 @@ class CSVFilterApp(QWidget):
         chk_labels.setChecked(self.show_labels)
         chk_arrows = QCheckBox("Draw fly arrows (off = circles)")
         chk_arrows.setChecked(self.draw_arrows)
+        chk_frame_counter = QCheckBox("Show frame counter")
+        chk_frame_counter.setChecked(self.show_frame_counter)
         layout.addWidget(chk_blank)
         layout.addWidget(chk_boxes)
         layout.addWidget(chk_labels)
         layout.addWidget(chk_arrows)
+        layout.addWidget(chk_frame_counter)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -348,6 +395,7 @@ class CSVFilterApp(QWidget):
             self.draw_boxes = chk_boxes.isChecked()
             self.show_labels = chk_labels.isChecked()
             self.draw_arrows = chk_arrows.isChecked()
+            self.show_frame_counter = chk_frame_counter.isChecked()
 
     def load_csv(self):
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Fly CSV Files", "", "CSV Files (*.csv)")
@@ -360,9 +408,9 @@ class CSVFilterApp(QWidget):
                     fly_id = os.path.splitext(os.path.basename(file_path))[0]
                     df["fly_id"] = fly_id
                     all_data.append(df)
-                    self.fly_colors[fly_id] = PREDEFINED_COLORS[idx % len(PREDEFINED_COLORS)]
+                    self.fly_colors[fly_id] = generate_fly_color(fly_id)
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
-                if self.video_path and self.edgelist_path:
+                if self.edgelist_path:
                     self.video_button.setEnabled(True)
                 self.plot_button.setEnabled(True)
             except Exception as e:
@@ -379,7 +427,7 @@ class CSVFilterApp(QWidget):
         edgelist_path, _ = QFileDialog.getOpenFileName(self, "Select Edgelist CSV", "", "CSV Files (*.csv)")
         if edgelist_path:
             self.edgelist_path = edgelist_path
-            if self.all_flies_df is not None and self.video_path:
+            if self.all_flies_df is not None:
                 self.video_button.setEnabled(True)
 
     def plot_fly_paths(self):
@@ -403,17 +451,25 @@ class CSVFilterApp(QWidget):
             QMessageBox.critical(self, "Plot Error", f"Failed to plot fly paths:\n{str(e)}")
 
     def generate_video(self):
-        if self.all_flies_df is None or not self.video_path or not self.edgelist_path:
-            QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs, video, and edgelist before generating the video.")
+        if self.all_flies_df is None or not self.edgelist_path:
+            QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs and edgelist before generating the video.")
             return
+
+        if not self.video_path:
+            use_blank = True
+            QMessageBox.information(self, "No Video", "No background video loaded. Using blank white background.")
+        else:
+            use_blank = self.use_blank_background
+
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
         self.video_thread = VideoProcessingThread(
             self.all_flies_df, self.video_path, self.edgelist_path, self.fly_colors,
-            use_blank=self.use_blank_background,
+            use_blank=use_blank,
             draw_boxes=self.draw_boxes,
             draw_labels=self.show_labels,
-            draw_arrows=self.draw_arrows
+            draw_arrows=self.draw_arrows,
+            show_frame_counter=self.show_frame_counter
         )
         self.video_thread.update_progress.connect(self.show_progress)
         self.video_thread.update_progress_bar.connect(self.progress_dialog.setValue)
