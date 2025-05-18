@@ -248,7 +248,15 @@ class VideoProcessingThread(QThread):
                 max_x_box = min(frame.shape[1], int(max(xs) + margin))
                 min_y_box = max(0, int(min(ys) - margin))
                 max_y_box = min(frame.shape[0], int(max(ys) + margin))
-                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), (0, 255, 255), 3)
+                group_size = len(group)
+                if group_size == 2:
+                    box_color = (0, 128, 0)  #  Green
+                elif group_size == 3:
+                    box_color = (0, 255, 255)  # Yellow
+                else:
+                    box_color = (0, 0, 255)    # Red
+
+                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, 3)
 
 
 class VideoPlayerWindow(QWidget):
