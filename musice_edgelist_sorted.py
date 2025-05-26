@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
     QFileDialog, QTextEdit, QMessageBox, QProgressDialog,
     QHBoxLayout, QStyle, QSlider, QLabel, QDialog,
-    QCheckBox, QDialogButtonBox, QTabWidget, QLineEdit, QComboBox
+    QCheckBox, QDialogButtonBox, QTabWidget,QComboBox,QLineEdit, QFormLayout
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
@@ -32,32 +32,28 @@ class VideoProcessingThread(QThread):
     update_progress = pyqtSignal(str)
     update_progress_bar = pyqtSignal(int)
     video_saved = pyqtSignal(str, float)
-
+    
     def __init__(self, all_flies_df, video_path, edgelist_path=None, fly_colors=None,
              use_blank=False, draw_boxes=True, draw_labels=True, draw_arrows=True,
-             show_frame_counter=True, resolution_scale="Original", custom_resolution="1280x720",
-             start_frame=0, end_frame=None):
-            super().__init__()
-            self.all_flies_df = all_flies_df
-            self.video_path = video_path
-            self.edgelist_path = edgelist_path
-            self.fly_colors = fly_colors or {}
-            self.use_blank = use_blank
-            self.draw_boxes = draw_boxes
-            self.draw_labels = draw_labels
-            self.draw_arrows = draw_arrows
-            self.show_frame_counter = show_frame_counter
-            self.resolution_scale = resolution_scale
-            self.custom_resolution = custom_resolution
-            self.start_frame = start_frame
-            self.end_frame = end_frame
-            self._is_cancelled = False
-            self.resolution_scale = "Original"
-            self.custom_resolution = "1280x720"
-            self.start_frame = 0
-            self.end_frame = None
-
-
+             show_frame_counter=True, scale_factor=1.0, edge_persistence_seconds=0,
+             save_graphs=False, graph_interval_min=1, start_time_min=0, end_time_min=None):
+        super().__init__()
+        self.all_flies_df = all_flies_df
+        self.video_path = video_path
+        self.edgelist_path = edgelist_path
+        self.fly_colors = fly_colors or {}
+        self.use_blank = use_blank
+        self.draw_boxes = draw_boxes
+        self.draw_labels = draw_labels
+        self.draw_arrows = draw_arrows
+        self.show_frame_counter = show_frame_counter
+        self._is_cancelled = False
+        self.scale_factor = scale_factor
+        self.edge_persistence_seconds = edge_persistence_seconds
+        self.save_graphs = save_graphs
+        self.graph_interval_min = graph_interval_min
+        self.start_time_min = start_time_min
+        self.end_time_min = end_time_min
 
     def cancel(self):
         self._is_cancelled = True
@@ -78,12 +74,73 @@ class VideoProcessingThread(QThread):
         return sorted(interactions, key=lambda x: x[0])
 
     def get_video_info(self, cap):
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) * self.scale_factor)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * self.scale_factor)
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         return width, height, fps, total_frames
+    
+    def draw_static_tip_arrow(self, frame, pt1, pt2, color, thickness=4, tip_length=20):
+        x1, y1 = pt1
+        x2, y2 = pt2
+        
+        # Calculate the distance between points
+        dx = x2 - x1
+        dy = y2 - y1
+        distance = np.sqrt(dx**2 + dy**2)
+        
+        if distance == 0:
+            return
+        
+        # Dynamic offset parameters
+        max_offset = 50
+        min_offset = 10
+        min_distance_for_max_offset = 200
+        
+        # Calculate dynamic offset
+        offset = min_offset + (max_offset - min_offset) * min(distance / min_distance_for_max_offset, 1)
+        
+        # Calculate unit vector
+        ux = dx / distance
+        uy = dy / distance
+        
+        # Apply dynamic offset
+        start_x = int(x1 + ux * offset)
+        start_y = int(y1 + uy * offset)
+        end_x = int(x2 - ux * offset)
+        end_y = int(y2 - uy * offset)
+        
+        # Draw shaft of the arrow
+        cv2.line(frame, (start_x, start_y), (end_x, end_y), color, thickness)
+        
+        # Calculate the base of the arrowhead
+        base_x = end_x - int(ux * tip_length)
+        base_y = end_y - int(uy * tip_length)
+        
+        # Normal vector
+        nx = -uy
+        ny = ux
+        
+        wing_size = tip_length // 2
+        wing1 = (int(base_x + nx * wing_size), int(base_y + ny * wing_size))
+        wing2 = (int(base_x - nx * wing_size), int(base_y - ny * wing_size))
+        
+        # Draw triangle arrowhead
+        cv2.fillConvexPoly(frame, np.array([[end_x, end_y], wing1, wing2], dtype=np.int32), color)
 
+    def draw_edges(self, frame, frame_idx, interactions, transformed_positions):
+        for (start, end, fly1, fly2) in interactions:
+            extended_end = end + int(self.edge_persistence_seconds * self.fps)
+            if start <= frame_idx <= extended_end:
+                if (fly1 in transformed_positions and
+                    fly2 in transformed_positions and
+                    frame_idx < len(transformed_positions[fly1]) and
+                    frame_idx < len(transformed_positions[fly2])):
+
+                    x1, y1, _ = transformed_positions[fly1][frame_idx]
+                    x2, y2, _ = transformed_positions[fly2][frame_idx]
+                    self.draw_static_tip_arrow(frame, (int(x1), int(y1)), (int(x2), int(y2)), 
+                                            (0, 0, 0), thickness=4, tip_length=20)
     def transform_fly_positions(self, frame_width, frame_height):
         fly_data = {
             fly_id: df.reset_index(drop=True)
@@ -113,10 +170,13 @@ class VideoProcessingThread(QThread):
         out = None
         try:
             start_time = time.time()
-
+            
             if self.use_blank:
-                frame_width, frame_height = 3052, 2304
-                fps = 30
+                cap = None
+                frame_width, frame_height = 3052, 2304  # Default size for blank background
+                frame_width = int(frame_width * self.scale_factor)
+                frame_height = int(frame_height * self.scale_factor)
+                self.fps = 24  # Default FPS for blank background
                 transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
                 total_frames = max_data_len
             else:
@@ -124,60 +184,73 @@ class VideoProcessingThread(QThread):
                 if not cap.isOpened():
                     self.update_progress.emit("Failed to open video.")
                     return
-                frame_width, frame_height, fps, total_frames = self.get_video_info(cap)
+                frame_width, frame_height, self.fps, total_frames = self.get_video_info(cap)
                 transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
 
-            max_frames = min(max_data_len, total_frames)
-            start_idx = self.start_frame
-            end_idx = self.end_frame if self.end_frame is not None else max_frames
-            end_idx = min(end_idx, max_frames)
-
-            # Output resolution setup
-            if self.resolution_scale != "Original":
-                if self.resolution_scale in ["75%", "50%", "25%"]:
-                    factor = {"75%": 0.75, "50%": 0.5, "25%": 0.25}[self.resolution_scale]
-                    out_width = int(frame_width * factor)
-                    out_height = int(frame_height * factor)
-                elif self.resolution_scale == "Custom":
-                    try:
-                        out_width, out_height = map(int, self.custom_resolution.lower().split("x"))
-                    except:
-                        out_width, out_height = frame_width, frame_height
-            else:
-                out_width, out_height = frame_width, frame_height
+            # Calculate start and end frames using the actual FPS (self.fps)
+            start_frame = int(self.start_time_min * 60 * self.fps)
+            end_frame = int(self.end_time_min * 60 * self.fps) if self.end_time_min is not None else None
+        
+            # Adjust frame range if needed
+            if end_frame is None or end_frame > max_data_len:
+                end_frame = max_data_len
+            if start_frame >= end_frame:
+                self.update_progress.emit("Invalid time range selected.")
+                return
 
             base_name = os.path.splitext(os.path.basename(self.video_path if self.video_path else "blank"))[0]
-            output_filename = f"{base_name}_overlay_fly.mp4"
-            out = cv2.VideoWriter(output_filename, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_width, out_height))
-
+            time_suffix = f"_{self.start_time_min}to{self.end_time_min}min" if self.end_time_min else ""
+            output_filename = f"{base_name}_overlay_fly{time_suffix}.mp4"
+            out = cv2.VideoWriter(
+                output_filename,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                self.fps, (frame_width, frame_height))
+            
             if not out.isOpened():
                 self.update_progress.emit("Failed to create output video file.")
                 return
 
             interactions = self.parse_edgelist(self.edgelist_path) if self.edgelist_path else []
+            frame_idx = start_frame
+            last_screenshot_frame = -1
 
-            for frame_idx in range(start_idx, end_idx):
+            # Seek to start frame if using video
+            if not self.use_blank:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+            while frame_idx < end_frame:
                 if self._is_cancelled:
                     break
 
                 if self.use_blank:
                     frame = np.ones((frame_height, frame_width, 3), dtype=np.uint8) * 255
+                    ret = True
                 else:
                     ret, frame = cap.read()
                     if not ret:
                         break
+                    if self.scale_factor != 1.0:
+                        frame = cv2.resize(frame, (frame_width, frame_height))
 
                 self.draw_flies(frame, frame_idx, transformed_positions)
+                self.draw_edges(frame, frame_idx, interactions, transformed_positions)
                 if self.draw_boxes:
                     self.draw_interaction_groups(frame, frame_idx, interactions, transformed_positions)
+
                 if self.show_frame_counter:
                     self.draw_frame_counter(frame, frame_idx)
 
-                if self.resolution_scale != "Original":
-                    frame = cv2.resize(frame, (out_width, out_height), interpolation=cv2.INTER_AREA)
+                if self.save_graphs:
+                    screenshot_every_frames = int(self.graph_interval_min * 60 * self.fps)
+                    if frame_idx % screenshot_every_frames == 0 and frame_idx != last_screenshot_frame:
+                        screenshot_path = f"screenshot_frame_{frame_idx}.png"
+                        cv2.imwrite(screenshot_path, frame)
+                        last_screenshot_frame = frame_idx
 
                 out.write(frame)
-                self.update_progress_bar.emit(int(((frame_idx - start_idx) / (end_idx - start_idx)) * 100))
+                progress = int(((frame_idx - start_frame) / (end_frame - start_frame)) * 100)
+                self.update_progress_bar.emit(progress)
+                frame_idx += 1
 
             if self._is_cancelled:
                 self.update_progress.emit("Video generation cancelled.")
@@ -187,11 +260,12 @@ class VideoProcessingThread(QThread):
             self.video_saved.emit(output_filename, elapsed)
 
         except Exception as e:
-            self.update_progress.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
+            error_message = f"Error: {str(e)}\n{traceback.format_exc()}"
+            self.update_progress.emit(error_message)
         finally:
-            if cap:
+            if cap is not None:
                 cap.release()
-            if out:
+            if out is not None:
                 out.release()
 
     def draw_frame_counter(self, frame, frame_idx):
@@ -203,6 +277,18 @@ class VideoProcessingThread(QThread):
         thickness = 2
         cv2.putText(frame, text, position, font, font_scale, color, thickness, cv2.LINE_AA)
 
+    def draw_offset_edge(self, frame, pos1, pos2, color, thickness=2, offset=50):
+        p1 = np.array(pos1, dtype=np.float32)
+        p2 = np.array(pos2, dtype=np.float32)
+        vec = p2 - p1
+        norm = np.linalg.norm(vec)
+        if norm == 0:
+            return  # Avoid division by zero
+        unit_vec = vec / norm
+        offset_vec = unit_vec * offset
+        start = tuple(np.round(p1 + offset_vec).astype(int))
+        end = tuple(np.round(p2 - offset_vec).astype(int))
+        cv2.line(frame, start, end, color, thickness)
 
 
     def draw_flies(self, frame, frame_idx, transformed_positions):
@@ -216,7 +302,8 @@ class VideoProcessingThread(QThread):
             if self.draw_arrows:
                 dx = int(40 * np.cos(ori))
                 dy = int(-40 * np.sin(ori))
-                cv2.arrowedLine(frame, (x, y), (x + dx, y + dy), color, 10, tipLength=0.3)
+                cv2.line(frame, (x, y), (x + dx, y + dy), color, 10)
+                cv2.circle(frame, (x + dx, y + dy), 8, color, -1)
             else:
                 cv2.circle(frame, (x, y), 10, color, -1)
             if self.draw_labels:
@@ -227,9 +314,10 @@ class VideoProcessingThread(QThread):
     def draw_interaction_groups(self, frame, frame_idx, interactions, transformed_positions):
         adjacency = defaultdict(set)
         for (start, end, fly1, fly2) in interactions:
-            if start <= frame_idx <= end:
-                adjacency[fly1].add(fly2)
-                adjacency[fly2].add(fly1)
+                extended_end = end + int(self.edge_persistence_seconds * 60)         
+                if start <= frame_idx <= extended_end:
+                    adjacency[fly1].add(fly2)
+                    adjacency[fly2].add(fly1)
 
         visited = set()
         components = []
@@ -259,8 +347,8 @@ class VideoProcessingThread(QThread):
                         fly2 = group_list[j]
                         if fly2 in transformed_positions and frame_idx < len(transformed_positions[fly2]):
                             x2, y2, _ = transformed_positions[fly2][frame_idx]
-                            cv2.arrowedLine(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 0), 4, tipLength=0.1)
-
+                            self.draw_static_tip_arrow(frame, (int(x1), int(y1)), (int(x2), int(y2)), 
+                                                    (0, 0, 0), thickness=4, tip_length=20)            
             if xs and ys:
                 margin = 60
                 min_x_box = max(0, int(min(xs) - margin))
@@ -338,6 +426,12 @@ class CSVFilterApp(QWidget):
         self.resize(800, 600)
         self.layout = QVBoxLayout(self)
         button_table_layout = QHBoxLayout()
+        self.scale_factor = 1.0
+        self.edge_persistence_seconds = 0
+        self.enable_screenshot_saving = False
+        self.screenshot_interval_min = 1
+
+
 
         left_column = QVBoxLayout()
         self.load_button = QPushButton("Load Fly CSVs")
@@ -385,12 +479,6 @@ class CSVFilterApp(QWidget):
         self.show_labels = True
         self.draw_arrows = True
         self.show_frame_counter = True
-        self.resolution_scale = "Original"
-        self.custom_resolution = "1280x720"
-        self.start_frame = 0
-        self.end_frame = None
-
-
 
 
         self.progress_dialog = QProgressDialog("Processing video...", "Cancel", 0, 100, self)
@@ -402,10 +490,9 @@ class CSVFilterApp(QWidget):
     def open_options_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Options")
-        layout = QVBoxLayout(dialog)
         tabs = QTabWidget()
 
-        # Visuals tab
+        # --- Visuals Tab ---
         visuals_tab = QWidget()
         visuals_layout = QVBoxLayout()
         chk_blank = QCheckBox("Use blank background (no video)")
@@ -418,53 +505,80 @@ class CSVFilterApp(QWidget):
         chk_arrows.setChecked(self.draw_arrows)
         chk_frame_counter = QCheckBox("Show frame counter")
         chk_frame_counter.setChecked(self.show_frame_counter)
-        for widget in [chk_blank, chk_boxes, chk_labels, chk_arrows, chk_frame_counter]:
-            visuals_layout.addWidget(widget)
+
+        for chk in [chk_blank, chk_boxes, chk_labels, chk_arrows, chk_frame_counter]:
+            visuals_layout.addWidget(chk)
+
         visuals_tab.setLayout(visuals_layout)
         tabs.addTab(visuals_tab, "Visuals")
 
-        # Timing tab
+        # --- Timing Tab ---
         timing_tab = QWidget()
         timing_layout = QVBoxLayout()
-        start_label = QLabel("Start Frame:")
-        start_input = QLineEdit(str(self.start_frame))
-        end_label = QLabel("End Frame (leave empty = full video):")
-        end_input = QLineEdit("" if self.end_frame is None else str(self.end_frame))
-        for widget in [start_label, start_input, end_label, end_input]:
-            timing_layout.addWidget(widget)
+        
+        # Time range controls
+        time_range_group = QWidget()
+        time_range_layout = QFormLayout()
+        self.start_time_edit = QLineEdit("0")
+        self.end_time_edit = QLineEdit("")
+        time_range_layout.addRow("Start Time (min):", self.start_time_edit)
+        time_range_layout.addRow("End Time (min):", self.end_time_edit)
+        time_range_group.setLayout(time_range_layout)
+        timing_layout.addWidget(QLabel("Time Range:"))
+        timing_layout.addWidget(time_range_group)
+
+        timing_label = QLabel("Edge Persistence (seconds):")
+        self.edge_time_slider = QSlider(Qt.Horizontal)
+        self.edge_time_slider.setRange(0, 60)
+        self.edge_time_slider.setValue(self.edge_persistence_seconds)
+        self.edge_time_label = QLabel(f"{self.edge_persistence_seconds} s")
+        self.edge_time_slider.valueChanged.connect(lambda v: self.edge_time_label.setText(f"{v} s"))
+        timing_layout.addWidget(timing_label)
+        timing_layout.addWidget(self.edge_time_slider)
+        timing_layout.addWidget(self.edge_time_label)
+        
+        self.save_screenshot_checkbox = QCheckBox("Save screenshot every X minutes")
+        self.save_screenshot_checkbox.setChecked(self.enable_screenshot_saving)
+
+        self.screenshot_interval_slider = QSlider(Qt.Horizontal)
+        self.screenshot_interval_slider.setRange(1, 30)
+        self.screenshot_interval_slider.setValue(self.screenshot_interval_min)
+        self.screenshot_interval_slider.setEnabled(self.enable_screenshot_saving)
+
+        self.screenshot_interval_label = QLabel(f"{self.screenshot_interval_min} min")
+
+        self.screenshot_interval_slider.valueChanged.connect(
+            lambda v: self.screenshot_interval_label.setText(f"{v} min")
+        )
+        self.save_screenshot_checkbox.toggled.connect(self.screenshot_interval_slider.setEnabled)
+
+        timing_layout.addWidget(self.save_screenshot_checkbox)
+        timing_layout.addWidget(self.screenshot_interval_slider)
+        timing_layout.addWidget(self.screenshot_interval_label)
+
         timing_tab.setLayout(timing_layout)
         tabs.addTab(timing_tab, "Timing")
 
-        # Output tab
-        output_tab = QWidget()
-        output_layout = QVBoxLayout()
-        scale_label = QLabel("Output Resolution:")
-        scale_combo = QComboBox()
-        scale_combo.addItems(["Original", "75%", "50%", "25%", "Custom"])
-        scale_combo.setCurrentText(self.resolution_scale)
-        custom_label = QLabel("Custom Resolution (e.g. 1280x720):")
-        custom_input = QLineEdit(self.custom_resolution)
-        custom_label.setVisible(self.resolution_scale == "Custom")
-        custom_input.setVisible(self.resolution_scale == "Custom")
+        # --- Scale Tab ---
+        scale_tab = QWidget()
+        scale_layout = QVBoxLayout()
+        scale_label = QLabel("Scale Output Video:")
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
+        current_scale_idx = ["100%", "75%", "50%", "25%"].index(f"{int(self.scale_factor * 100)}%")
+        self.scale_combo.setCurrentIndex(current_scale_idx)
+        scale_layout.addWidget(scale_label)
+        scale_layout.addWidget(self.scale_combo)
+        scale_tab.setLayout(scale_layout)
+        tabs.addTab(scale_tab, "Scale")
 
-        def on_scale_changed(index):
-            is_custom = scale_combo.currentText() == "Custom"
-            custom_label.setVisible(is_custom)
-            custom_input.setVisible(is_custom)
-
-        scale_combo.currentIndexChanged.connect(on_scale_changed)
-        for widget in [scale_label, scale_combo, custom_label, custom_input]:
-            output_layout.addWidget(widget)
-        output_tab.setLayout(output_layout)
-        tabs.addTab(output_tab, "Output")
-
+        layout = QVBoxLayout()
         layout.addWidget(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(buttons)
-        dialog.setLayout(layout)
-
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.setLayout(layout)
 
         if dialog.exec_():
             self.use_blank_background = chk_blank.isChecked()
@@ -472,19 +586,13 @@ class CSVFilterApp(QWidget):
             self.show_labels = chk_labels.isChecked()
             self.draw_arrows = chk_arrows.isChecked()
             self.show_frame_counter = chk_frame_counter.isChecked()
-            self.resolution_scale = scale_combo.currentText()
-            self.custom_resolution = custom_input.text()
-            try:
-                self.start_frame = max(0, int(start_input.text()))
-            except ValueError:
-                self.start_frame = 0
-            try:
-                self.end_frame = int(end_input.text())
-                if self.end_frame < self.start_frame:
-                    self.end_frame = None
-            except ValueError:
-                self.end_frame = None
-
+            self.edge_persistence_seconds = self.edge_time_slider.value()
+            scale_text = self.scale_combo.currentText()
+            self.scale_factor = int(scale_text.strip('%')) / 100.0
+            self.enable_screenshot_saving = self.save_screenshot_checkbox.isChecked()
+            self.screenshot_interval_min = self.screenshot_interval_slider.value()
+            self.start_time_min = float(self.start_time_edit.text()) if self.start_time_edit.text() else 0
+            self.end_time_min = float(self.end_time_edit.text()) if self.end_time_edit.text() else None
 
     def load_csv(self):
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Fly CSV Files", "", "CSV Files (*.csv)")
@@ -493,7 +601,7 @@ class CSVFilterApp(QWidget):
                 all_data = []
                 self.fly_colors.clear()
                 for idx, file_path in enumerate(file_paths):
-                    df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"], nrows =500)
+                    df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
                     fly_id = os.path.splitext(os.path.basename(file_path))[0]
                     df["fly_id"] = fly_id
                     all_data.append(df)
@@ -550,24 +658,35 @@ class CSVFilterApp(QWidget):
         else:
             use_blank = self.use_blank_background
 
+        # Disable boxes if edge persistence is used
+        final_draw_boxes = False
+        final_draw_arrows = self.draw_arrows
+        final_draw_boxes = self.draw_boxes
+        if self.edge_persistence_seconds >= 1:
+            final_draw_arrows = False
+            final_draw_boxes = False
+
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
         self.video_thread = VideoProcessingThread(
-                self.all_flies_df, self.video_path, self.edgelist_path, self.fly_colors,
-                use_blank=use_blank,
-                draw_boxes=self.draw_boxes,
-                draw_labels=self.show_labels,
-                draw_arrows=self.draw_arrows,
-                show_frame_counter=self.show_frame_counter,
-                resolution_scale=self.resolution_scale,
-                custom_resolution=self.custom_resolution,
-                start_frame=self.start_frame,
-                end_frame=self.end_frame
+            self.all_flies_df, self.video_path, self.edgelist_path, self.fly_colors,
+            use_blank=use_blank,
+            draw_boxes=final_draw_boxes,
+            draw_labels=self.show_labels,
+            draw_arrows=final_draw_arrows,
+            show_frame_counter=self.show_frame_counter,
+            scale_factor=self.scale_factor,
+            edge_persistence_seconds=self.edge_persistence_seconds,
+            save_graphs=self.enable_screenshot_saving,
+            graph_interval_min=self.screenshot_interval_min,
+            start_time_min=self.start_time_min,
+            end_time_min=self.end_time_min
         )
+
         self.video_thread.update_progress.connect(self.show_progress)
         self.video_thread.update_progress_bar.connect(self.progress_dialog.setValue)
         self.video_thread.video_saved.connect(self.show_video_saved)
-        self.video_thread.finished.connect(self.on_video_thread_finished)  # NEW
+        self.video_thread.finished.connect(self.on_video_thread_finished)
         self.video_thread.start()
 
     def cancel_video_processing(self):
