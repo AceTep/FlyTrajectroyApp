@@ -34,8 +34,10 @@ class VideoProcessingThread(QThread):
     def __init__(self, all_flies_df, video_path, edgelist_path=None, fly_colors=None,
              use_blank=False, draw_boxes=True, draw_labels=True, draw_arrows=True,
              show_frame_counter=True, scale_factor=1.0, edge_persistence_seconds=0,
-             save_graphs=False, graph_interval_min=1, start_time_min=0, end_time_min=None):
+             save_graphs=False, graph_interval_min=1, start_time_min=0, end_time_min=None,
+             fly_size=10):
         super().__init__()
+        self.fly_size = fly_size  
         self.all_flies_df = all_flies_df
         self.video_path = video_path
         self.edgelist_path = edgelist_path
@@ -52,6 +54,7 @@ class VideoProcessingThread(QThread):
         self.graph_interval_min = graph_interval_min
         self.start_time_min = start_time_min
         self.end_time_min = end_time_min
+        
 
     def cancel(self):
         self._is_cancelled = True
@@ -285,13 +288,15 @@ class VideoProcessingThread(QThread):
             x, y, ori = coords[frame_idx]
             x, y = int(x), int(y)
             color = self.fly_colors.get(fly_id, (255, 255, 255))
+            circle_size = self.fly_size * 2 if self.use_blank else self.fly_size
             if self.draw_arrows:
                 dx = int(40 * np.cos(ori))
                 dy = int(-40 * np.sin(ori))
                 cv2.line(frame, (x, y), (x + dx, y + dy), color, 10)
                 cv2.circle(frame, (x + dx, y + dy), 8, color, -1)
             else:
-                cv2.circle(frame, (x, y), 10, color, -1)
+                cv2.circle(frame, (x, y), circle_size, color, -1)  # Use the adjusted size
+            
             if self.draw_labels:
                 cv2.putText(frame, str(fly_id), (x + 10, y - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
@@ -416,7 +421,9 @@ class CSVFilterApp(QWidget):
         self.edge_persistence_seconds = 0
         self.enable_screenshot_saving = False
         self.screenshot_interval_min = 1
-
+        self.start_time_min = 0
+        self.end_time_min = None
+        
 
 
         left_column = QVBoxLayout()
@@ -501,8 +508,8 @@ class CSVFilterApp(QWidget):
         # Time range controls
         time_range_group = QWidget()
         time_range_layout = QFormLayout()
-        self.start_time_edit = QLineEdit("0")
-        self.end_time_edit = QLineEdit("")
+        self.start_time_edit = QLineEdit(str(self.start_time_min))  # Initialize with stored value
+        self.end_time_edit = QLineEdit(str(self.end_time_min) if self.end_time_min is not None else "")  # Initialize with stored value
         time_range_layout.addRow("Start Time (min):", self.start_time_edit)
         time_range_layout.addRow("End Time (min):", self.end_time_edit)
         time_range_group.setLayout(time_range_layout)
@@ -573,8 +580,17 @@ class CSVFilterApp(QWidget):
             self.scale_factor = int(scale_text.strip('%')) / 100.0
             self.enable_screenshot_saving = self.save_screenshot_checkbox.isChecked()
             self.screenshot_interval_min = self.screenshot_interval_slider.value()
-            self.start_time_min = float(self.start_time_edit.text()) if self.start_time_edit.text() else 0
-            self.end_time_min = float(self.end_time_edit.text()) if self.end_time_edit.text() else None
+            
+            # Store the time range values
+            try:
+                self.start_time_min = float(self.start_time_edit.text()) if self.start_time_edit.text() else 0
+            except ValueError:
+                self.start_time_min = 0
+            try:
+                end_text = self.end_time_edit.text()
+                self.end_time_min = float(end_text) if end_text else None
+            except ValueError:
+                self.end_time_min = None
 
     def load_csv(self):
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Fly CSV Files", "", "CSV Files (*.csv)")
@@ -642,7 +658,8 @@ class CSVFilterApp(QWidget):
             save_graphs=self.enable_screenshot_saving,
             graph_interval_min=self.screenshot_interval_min,
             start_time_min=self.start_time_min,
-            end_time_min=self.end_time_min
+            end_time_min=self.end_time_min,
+            fly_size=13 
         )
 
         self.video_thread.update_progress.connect(self.show_progress)
