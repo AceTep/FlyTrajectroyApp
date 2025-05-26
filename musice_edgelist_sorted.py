@@ -1,6 +1,5 @@
 import sys
 import pandas as pd
-import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 import time
@@ -21,7 +20,6 @@ from PyQt5.QtMultimediaWidgets import QVideoWidget
 import hashlib
 
 def generate_fly_color(fly_id):
-    # Hash the fly_id to a consistent 6-digit hex
     digest = hashlib.md5(fly_id.encode()).hexdigest()
     r = int(digest[0:2], 16)
     g = int(digest[2:4], 16)
@@ -84,7 +82,6 @@ class VideoProcessingThread(QThread):
         x1, y1 = pt1
         x2, y2 = pt2
         
-        # Calculate the distance between points
         dx = x2 - x1
         dy = y2 - y1
         distance = np.sqrt(dx**2 + dy**2)
@@ -92,32 +89,25 @@ class VideoProcessingThread(QThread):
         if distance == 0:
             return
         
-        # Dynamic offset parameters
         max_offset = 50
         min_offset = 10
         min_distance_for_max_offset = 200
         
-        # Calculate dynamic offset
         offset = min_offset + (max_offset - min_offset) * min(distance / min_distance_for_max_offset, 1)
         
-        # Calculate unit vector
         ux = dx / distance
         uy = dy / distance
         
-        # Apply dynamic offset
         start_x = int(x1 + ux * offset)
         start_y = int(y1 + uy * offset)
         end_x = int(x2 - ux * offset)
         end_y = int(y2 - uy * offset)
         
-        # Draw shaft of the arrow
         cv2.line(frame, (start_x, start_y), (end_x, end_y), color, thickness)
         
-        # Calculate the base of the arrowhead
         base_x = end_x - int(ux * tip_length)
         base_y = end_y - int(uy * tip_length)
         
-        # Normal vector
         nx = -uy
         ny = ux
         
@@ -125,7 +115,6 @@ class VideoProcessingThread(QThread):
         wing1 = (int(base_x + nx * wing_size), int(base_y + ny * wing_size))
         wing2 = (int(base_x - nx * wing_size), int(base_y - ny * wing_size))
         
-        # Draw triangle arrowhead
         cv2.fillConvexPoly(frame, np.array([[end_x, end_y], wing1, wing2], dtype=np.int32), color)
 
     def draw_edges(self, frame, frame_idx, interactions, transformed_positions):
@@ -187,11 +176,9 @@ class VideoProcessingThread(QThread):
                 frame_width, frame_height, self.fps, total_frames = self.get_video_info(cap)
                 transformed_positions, max_data_len = self.transform_fly_positions(frame_width, frame_height)
 
-            # Calculate start and end frames using the actual FPS (self.fps)
             start_frame = int(self.start_time_min * 60 * self.fps)
             end_frame = int(self.end_time_min * 60 * self.fps) if self.end_time_min is not None else None
         
-            # Adjust frame range if needed
             if end_frame is None or end_frame > max_data_len:
                 end_frame = max_data_len
             if start_frame >= end_frame:
@@ -214,7 +201,6 @@ class VideoProcessingThread(QThread):
             frame_idx = start_frame
             last_screenshot_frame = -1
 
-            # Seek to start frame if using video
             if not self.use_blank:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
@@ -283,7 +269,7 @@ class VideoProcessingThread(QThread):
         vec = p2 - p1
         norm = np.linalg.norm(vec)
         if norm == 0:
-            return  # Avoid division by zero
+            return  
         unit_vec = vec / norm
         offset_vec = unit_vec * offset
         start = tuple(np.round(p1 + offset_vec).astype(int))
@@ -448,10 +434,6 @@ class CSVFilterApp(QWidget):
         left_column.addWidget(self.options_button)
 
         right_column = QVBoxLayout()
-        self.plot_button = QPushButton("Plot Fly Paths")
-        self.plot_button.clicked.connect(self.plot_fly_paths)
-        self.plot_button.setEnabled(False)
-        right_column.addWidget(self.plot_button)
         self.video_button = QPushButton("Generate Video")
         self.video_button.clicked.connect(self.generate_video)
         self.video_button.setEnabled(False)
@@ -609,7 +591,6 @@ class CSVFilterApp(QWidget):
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
                 if self.edgelist_path:
                     self.video_button.setEnabled(True)
-                self.plot_button.setEnabled(True)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load CSVs:\n{str(e)}")
 
@@ -627,25 +608,6 @@ class CSVFilterApp(QWidget):
             if self.all_flies_df is not None:
                 self.video_button.setEnabled(True)
 
-    def plot_fly_paths(self):
-        if self.all_flies_df is None:
-            return
-        try:
-            plt.figure(figsize=(8, 6))
-            for fly_id in self.all_flies_df["fly_id"].unique():
-                fly_df = self.all_flies_df[self.all_flies_df["fly_id"] == fly_id]
-                color = np.array(self.fly_colors.get(fly_id, (0, 0, 0))) / 255.0
-                plt.plot(fly_df["pos x"], fly_df["pos y"], marker="o", markersize=2, linestyle='-', label=fly_id, color=color)
-            plt.title("Fly Trajectories")
-            plt.xlabel("Position X")
-            plt.ylabel("Position Y")
-            plt.gca().invert_yaxis()
-            plt.legend()
-            plt.grid(True)
-            plt.tight_layout()
-            plt.show()
-        except Exception as e:
-            QMessageBox.critical(self, "Plot Error", f"Failed to plot fly paths:\n{str(e)}")
 
     def generate_video(self):
         if self.all_flies_df is None or not self.edgelist_path:
@@ -694,7 +656,6 @@ class CSVFilterApp(QWidget):
             self.video_thread.cancel()
 
     def on_video_thread_finished(self):
-        # Called when thread finishes, either normally or after cancel
         self.progress_dialog.hide()
 
     def show_progress(self, message):
