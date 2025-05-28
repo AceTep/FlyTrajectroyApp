@@ -394,24 +394,35 @@ class VideoProcessingThread(QThread):
                         fly2 = group_list[j]
                         if fly2 in transformed_positions and frame_idx < len(transformed_positions[fly2]):
                             x2, y2, _ = transformed_positions[fly2][frame_idx]
-                            self.draw_static_tip_arrow(frame, (int(x1), int(y1)), (int(x2), int(y2)), 
-                                                    (0, 0, 0), thickness=4, tip_length=20)            
+                                
             if xs and ys:
-                margin = 60
-                min_x_box = max(0, int(min(xs) - margin))
-                max_x_box = min(frame.shape[1], int(max(xs) + margin))
-                min_y_box = max(0, int(min(ys) - margin))
-                max_y_box = min(frame.shape[0], int(max(ys) + margin))
-                group_size = len(group)
-                if group_size == 2:
-                    box_color = (0, 128, 0)  #  Green
-                elif group_size == 3:
-                    box_color = (0, 255, 255)  # Yellow
-                else:
-                    box_color = (0, 0, 255)    # Red
+                # Calculate maximum distance between any two flies in the group
+                max_distance = 0
+                positions = list(zip(xs, ys))
+                for i in range(len(positions)):
+                    for j in range(i+1, len(positions)):
+                        x1, y1 = positions[i]
+                        x2, y2 = positions[j]
+                        distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                        if distance > max_distance:
+                            max_distance = distance
+                
+                # Only draw box if flies are within 300 pixels of each other
+                if max_distance <= 300:
+                    margin = 60
+                    min_x_box = max(0, int(min(xs) - margin))
+                    max_x_box = min(frame.shape[1], int(max(xs) + margin))
+                    min_y_box = max(0, int(min(ys) - margin))
+                    max_y_box = min(frame.shape[0], int(max(ys) + margin))
+                    group_size = len(group)
+                    if group_size == 2:
+                        box_color = (0, 128, 0)  # Green
+                    elif group_size == 3:
+                        box_color = (0, 255, 255)  # Yellow
+                    else:
+                        box_color = (0, 0, 255)    # Red
 
-                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, 3)
-
+                    cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, 3)
 
 class VideoPlayerWindow(QWidget):
     def __init__(self, video_path):
@@ -753,15 +764,12 @@ class CSVFilterApp(QWidget):
             use_blank = self.use_blank_background
 
         # Disable boxes if edge persistence is used
-        final_draw_boxes = False
+        final_draw_boxes = True
         final_draw_arrows = self.draw_arrows
         final_draw_boxes = self.draw_boxes
         min_duration = getattr(self, 'min_edge_duration', 0)
         color_edges = getattr(self, 'color_code_edges', False)
 
-        if self.edge_persistence_seconds >= 1:
-            final_draw_boxes = False
-        
 
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
