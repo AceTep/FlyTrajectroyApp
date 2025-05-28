@@ -7,7 +7,8 @@ import csv
 import os
 import traceback
 from collections import defaultdict, deque
-
+import tomllib
+from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
@@ -32,10 +33,11 @@ class VideoProcessingThread(QThread):
     video_saved = pyqtSignal(str, float)
     
     def __init__(self, all_flies_df, video_path, edgelist_path=None, fly_colors=None,
-             use_blank=False, draw_boxes=True, draw_labels=True, draw_arrows=True,
-             show_frame_counter=True, scale_factor=1.0, edge_persistence_seconds=0,
-             save_graphs=False, graph_interval_min=1, start_time_min=0, end_time_min=None,
-             fly_size=10):
+                 use_blank=False, draw_boxes=True, draw_labels=True, draw_arrows=True,
+                 show_frame_counter=True, scale_factor=1.0, edge_persistence_seconds=0,
+                 save_graphs=False, graph_interval_min=1, start_time_min=0, end_time_min=None, 
+                 fly_size=10, draw_petri_circle=False, min_edge_duration=0, color_code_edges=False,
+                 calibration_values=None): 
         super().__init__()
         self.fly_size = fly_size  
         self.all_flies_df = all_flies_df
@@ -53,7 +55,11 @@ class VideoProcessingThread(QThread):
         self.save_graphs = save_graphs
         self.graph_interval_min = graph_interval_min
         self.start_time_min = start_time_min
-        self.end_time_min = end_time_min
+        self.end_time_min = end_time_min    
+        self.draw_petri_circle = draw_petri_circle
+        self.min_edge_duration = min_edge_duration
+        self.color_code_edges = color_code_edges
+        self.calibration_values = calibration_values 
         
 
     def cancel(self):
@@ -67,12 +73,14 @@ class VideoProcessingThread(QThread):
                 try:
                     start = int(row["start_of_interaction"])
                     end = int(row["end_of_interaction"])
-                    node_1 = row["node_1"]
-                    node_2 = row["node_2"]
-                    interactions.append((start, end, node_1, node_2))
+                    if (end - start) >= self.min_edge_duration:
+                        node_1 = row["node_1"]
+                        node_2 = row["node_2"]
+                        interactions.append((start, end, node_1, node_2))
                 except Exception as e:
                     print(f"Skipping row: {e}")
         return sorted(interactions, key=lambda x: x[0])
+
 
     def get_video_info(self, cap):
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) * self.scale_factor)
@@ -81,7 +89,14 @@ class VideoProcessingThread(QThread):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         return width, height, fps, total_frames
     
-    def draw_static_tip_arrow(self, frame, pt1, pt2, color, thickness=4, tip_length=20):
+    def draw_static_tip_arrow(self, frame, pt1, pt2, color, thickness=4, tip_length=20, duration=None):
+        if self.color_code_edges and duration is not None:
+            if duration < 50:
+                color = (0, 255, 0)      # Green
+            elif duration < 150:
+                color = (0, 255, 255)    # Yellow
+            else:
+                color = (0, 0, 255)      # Red
         x1, y1 = pt1
         x2, y2 = pt2
         
@@ -131,31 +146,57 @@ class VideoProcessingThread(QThread):
 
                     x1, y1, _ = transformed_positions[fly1][frame_idx]
                     x2, y2, _ = transformed_positions[fly2][frame_idx]
-                    self.draw_static_tip_arrow(frame, (int(x1), int(y1)), (int(x2), int(y2)), 
-                                            (0, 0, 0), thickness=4, tip_length=20)
+                    duration = end - start
+                    self.draw_static_tip_arrow(frame, (int(x1), int(y1)), (int(x2), int(y2)),
+                                            (0, 0, 0), thickness=4, tip_length=20, duration=duration)
+
     def transform_fly_positions(self, frame_width, frame_height):
         fly_data = {
             fly_id: df.reset_index(drop=True)
             for fly_id, df in self.all_flies_df.groupby("fly_id")
         }
 
-        all_x = self.all_flies_df["pos x"].values
-        all_y = self.all_flies_df["pos y"].values
-        min_x, max_x = all_x.min(), all_x.max()
-        min_y, max_y = all_y.min(), all_y.max()
+        # Try calibrated mode
+        try:
+            min_x = self.calibration_values['min_x']
+            min_y = self.calibration_values['min_y']
+            x_px_ratio = self.calibration_values['x_px_ratio']
+            y_px_ratio = self.calibration_values['y_px_ratio']
 
-        scale = 0.9 * min(frame_width / (max_x - min_x), frame_height / (max_y - min_y))
-        offset_x = (frame_width - scale * (max_x - min_x)) / 2
-        offset_y = (frame_height - scale * (max_y - min_y)) / 2
+            # Use calibrated transformation
+            transformed = {}
+            for fly_id, df in fly_data.items():
+                scaled_x = (df["pos x"].values * x_px_ratio) + min_x
+                scaled_y = (df["pos y"].values * y_px_ratio) + min_y
+                ori = df["ori"].values
+                transformed[fly_id] = np.stack([scaled_x, scaled_y, ori], axis=1)
 
-        transformed = {}
-        for fly_id, df in fly_data.items():
-            x = (df["pos x"].values - min_x) * scale + offset_x
-            y = (df["pos y"].values - min_y) * scale + offset_y
-            ori = df["ori"].values
-            transformed[fly_id] = np.stack([x, y, ori], axis=1)
+            return transformed, min(len(df) for df in fly_data.values())
 
-        return transformed, min(len(df) for df in fly_data.values())
+        except Exception as e:
+            print("⚠️ Calibration fallback activated:", e)
+
+            # Fall back to normalization-based scaling
+            all_x = self.all_flies_df["pos x"].values
+            all_y = self.all_flies_df["pos y"].values
+            min_x, max_x = all_x.min(), all_x.max()
+            min_y, max_y = all_y.min(), all_y.max()
+
+            scale = 0.9 * min(frame_width / (max_x - min_x), frame_height / (max_y - min_y))
+            offset_x = (frame_width - scale * (max_x - min_x)) / 2
+            offset_y = (frame_height - scale * (max_y - min_y)) / 2
+
+            transformed = {}
+            for fly_id, df in fly_data.items():
+                x = (df["pos x"].values - min_x) * scale + offset_x
+                y = (df["pos y"].values - min_y) * scale + offset_y
+                ori = df["ori"].values
+                transformed[fly_id] = np.stack([x, y, ori], axis=1)
+
+            return transformed, min(len(df) for df in fly_data.values())
+
+
+
 
     def run(self):
         cap = None
@@ -165,7 +206,7 @@ class VideoProcessingThread(QThread):
             
             if self.use_blank:
                 cap = None
-                frame_width, frame_height = 3052, 2304  # Default size for blank background
+                frame_width, frame_height = 3052, 2304  
                 frame_width = int(frame_width * self.scale_factor)
                 frame_height = int(frame_height * self.scale_factor)
                 self.fps = 24  # Default FPS for blank background
@@ -213,6 +254,10 @@ class VideoProcessingThread(QThread):
 
                 if self.use_blank:
                     frame = np.ones((frame_height, frame_width, 3), dtype=np.uint8) * 255
+                    if self.use_blank and self.draw_petri_circle:
+                        center = (frame.shape[1] // 2, frame.shape[0] // 2)
+                        radius = min(frame.shape[1], frame.shape[0]) // 2 - 50
+                        cv2.circle(frame, center, radius, (200, 200, 200), 8)
                     ret = True
                 else:
                     ret, frame = cap.read()
@@ -289,17 +334,28 @@ class VideoProcessingThread(QThread):
             x, y = int(x), int(y)
             color = self.fly_colors.get(fly_id, (255, 255, 255))
             circle_size = self.fly_size * 2 if self.use_blank else self.fly_size
+            
             if self.draw_arrows:
-                dx = int(40 * np.cos(ori))
-                dy = int(-40 * np.sin(ori))
-                cv2.line(frame, (x, y), (x + dx, y + dy), color, 10)
-                cv2.circle(frame, (x + dx, y + dy), 8, color, -1)
+                triangle_size = circle_size 
+                
+                front_x = x + int(triangle_size * 2 * np.cos(ori))
+                front_y = y - int(triangle_size * 2 * np.sin(ori))
+                
+                back_left_x = x + int(triangle_size * np.cos(ori + np.pi/2))
+                back_left_y = y - int(triangle_size * np.sin(ori + np.pi/2))
+                
+                back_right_x = x + int(triangle_size * np.cos(ori - np.pi/2))
+                back_right_y = y - int(triangle_size * np.sin(ori - np.pi/2))
+                
+                triangle_pts = np.array([[front_x, front_y], [back_left_x, back_left_y], [back_right_x, back_right_y]])
+                cv2.fillConvexPoly(frame, triangle_pts, color)
+                
             else:
-                cv2.circle(frame, (x, y), circle_size, color, -1)  # Use the adjusted size
+                cv2.circle(frame, (x, y), circle_size, color, -1) 
             
             if self.draw_labels:
                 cv2.putText(frame, str(fly_id), (x + 10, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, label_color, 2, cv2.LINE_AA)
 
 
     def draw_interaction_groups(self, frame, frame_idx, interactions, transformed_positions):
@@ -423,6 +479,18 @@ class CSVFilterApp(QWidget):
         self.screenshot_interval_min = 1
         self.start_time_min = 0
         self.end_time_min = None
+        self.draw_petri_circle = False
+        self.min_edge_duration = 0
+        self.color_code_edges = False
+        self.calibration_path = None
+        self.calibration_values = {
+            'min_x': 553.023338607595,
+            'min_y': 167.17559769167354,
+            'x_px_ratio': 31.839003077183513,
+            'y_px_ratio': 32.18860843823452
+        }
+
+
         
 
 
@@ -436,11 +504,16 @@ class CSVFilterApp(QWidget):
         self.load_edgelist_button = QPushButton("Load Edgelist CSV")
         self.load_edgelist_button.clicked.connect(self.load_edgelist)
         left_column.addWidget(self.load_edgelist_button)
-        self.options_button = QPushButton("Options")
-        self.options_button.clicked.connect(self.open_options_dialog)
-        left_column.addWidget(self.options_button)
+        self.load_calibration_button = QPushButton("Load Calibration File")
+        self.load_calibration_button.clicked.connect(self.load_calibration)
+        left_column.addWidget(self.load_calibration_button)
+
 
         right_column = QVBoxLayout()
+
+        self.options_button = QPushButton("Options")
+        self.options_button.clicked.connect(self.open_options_dialog)
+        right_column.addWidget(self.options_button)
         self.video_button = QPushButton("Generate Video")
         self.video_button.clicked.connect(self.generate_video)
         self.video_button.setEnabled(False)
@@ -495,6 +568,10 @@ class CSVFilterApp(QWidget):
         chk_frame_counter = QCheckBox("Show frame counter")
         chk_frame_counter.setChecked(self.show_frame_counter)
 
+        chk_draw_circle = QCheckBox("Draw petri dish circle")
+        chk_draw_circle.setChecked(getattr(self, 'draw_petri_circle', False))
+        visuals_layout.addWidget(chk_draw_circle)
+
         for chk in [chk_blank, chk_boxes, chk_labels, chk_arrows, chk_frame_counter]:
             visuals_layout.addWidget(chk)
 
@@ -545,6 +622,15 @@ class CSVFilterApp(QWidget):
         timing_layout.addWidget(self.screenshot_interval_slider)
         timing_layout.addWidget(self.screenshot_interval_label)
 
+
+        self.min_duration_label = QLabel("Min Interaction Duration (frames):")
+        self.min_duration_input = QLineEdit("0")
+        timing_layout.addWidget(self.min_duration_label)
+        timing_layout.addWidget(self.min_duration_input)
+
+        self.color_code_edges_checkbox = QCheckBox("Color-code edges by duration")
+        self.color_code_edges_checkbox.setChecked(False)
+        timing_layout.addWidget(self.color_code_edges_checkbox)
         timing_tab.setLayout(timing_layout)
         tabs.addTab(timing_tab, "Timing")
 
@@ -580,8 +666,16 @@ class CSVFilterApp(QWidget):
             self.scale_factor = int(scale_text.strip('%')) / 100.0
             self.enable_screenshot_saving = self.save_screenshot_checkbox.isChecked()
             self.screenshot_interval_min = self.screenshot_interval_slider.value()
-            
-            # Store the time range values
+            self.draw_petri_circle = chk_draw_circle.isChecked()
+
+
+            try:
+                self.min_edge_duration = int(self.min_duration_input.text())
+            except ValueError:
+                self.min_edge_duration = 0
+
+            self.color_code_edges = self.color_code_edges_checkbox.isChecked()
+
             try:
                 self.start_time_min = float(self.start_time_edit.text()) if self.start_time_edit.text() else 0
             except ValueError:
@@ -624,7 +718,29 @@ class CSVFilterApp(QWidget):
             if self.all_flies_df is not None:
                 self.video_button.setEnabled(True)
 
-
+    def load_calibration(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Calibration File", 
+            "", 
+            "TOML Files (*.toml);;All Files (*)"
+        )
+        if path:
+            try:
+                with open(path, "rb") as f:
+                    config = tomllib.load(f)
+                
+                # Update calibration values
+                self.calibration_values.update({
+                    'min_x': config['min_x'],
+                    'min_y': config['min_y'],
+                    'x_px_ratio': config['x_px_ratio'],
+                    'y_px_ratio': config['y_px_ratio']
+                })
+                self.calibration_path = path
+                QMessageBox.information(self, "Success", "Calibration file loaded successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load calibration:\n{str(e)}")
     def generate_video(self):
         if self.all_flies_df is None or not self.edgelist_path:
             QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs and edgelist before generating the video.")
@@ -640,9 +756,12 @@ class CSVFilterApp(QWidget):
         final_draw_boxes = False
         final_draw_arrows = self.draw_arrows
         final_draw_boxes = self.draw_boxes
+        min_duration = getattr(self, 'min_edge_duration', 0)
+        color_edges = getattr(self, 'color_code_edges', False)
+
         if self.edge_persistence_seconds >= 1:
-            final_draw_arrows = False
             final_draw_boxes = False
+        
 
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
@@ -659,8 +778,11 @@ class CSVFilterApp(QWidget):
             graph_interval_min=self.screenshot_interval_min,
             start_time_min=self.start_time_min,
             end_time_min=self.end_time_min,
-            fly_size=13 
-        )
+            fly_size=13,
+            draw_petri_circle=self.draw_petri_circle,
+            min_edge_duration=min_duration,
+            color_code_edges=color_edges,
+            calibration_values=self.calibration_values) 
 
         self.video_thread.update_progress.connect(self.show_progress)
         self.video_thread.update_progress_bar.connect(self.progress_dialog.setValue)
