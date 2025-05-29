@@ -360,12 +360,30 @@ class VideoProcessingThread(QThread):
 
     def draw_interaction_groups(self, frame, frame_idx, interactions, transformed_positions):
         adjacency = defaultdict(set)
+        
+        # Build adjacency list considering edge persistence and distance
         for (start, end, fly1, fly2) in interactions:
-                extended_end = end + int(self.edge_persistence_seconds * 60)         
-                if start <= frame_idx <= extended_end:
-                    adjacency[fly1].add(fly2)
-                    adjacency[fly2].add(fly1)
+            extended_end = end + int(self.edge_persistence_seconds * self.fps)
+            if start <= frame_idx <= extended_end:
+                # Only consider flies that exist in current frame
+                if (fly1 in transformed_positions and 
+                    fly2 in transformed_positions and
+                    frame_idx < len(transformed_positions[fly1]) and
+                    frame_idx < len(transformed_positions[fly2])):
+                    
+                    # Get current positions
+                    x1, y1, _ = transformed_positions[fly1][frame_idx]
+                    x2, y2, _ = transformed_positions[fly2][frame_idx]
+                    
+                    # Calculate distance between flies
+                    distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                    
+                    # Only connect if within threshold distance (300px default)
+                    if distance <= 300:
+                        adjacency[fly1].add(fly2)
+                        adjacency[fly2].add(fly1)
 
+        # Find connected components (groups) using BFS
         visited = set()
         components = []
 
@@ -381,49 +399,65 @@ class VideoProcessingThread(QThread):
                         queue.extend(adjacency[current] - visited)
                 components.append(group)
 
+        # Draw boxes around each valid group
         for group in components:
             xs, ys = [], []
-            group_list = list(group)
-            for i in range(len(group_list)):
-                fly_id = group_list[i]
+            group_positions = []
+            
+            # Collect all positions in the group
+            for fly_id in group:
                 if fly_id in transformed_positions and frame_idx < len(transformed_positions[fly_id]):
-                    x1, y1, _ = transformed_positions[fly_id][frame_idx]
-                    xs.append(x1)
-                    ys.append(y1)
-                    for j in range(i + 1, len(group_list)):
-                        fly2 = group_list[j]
-                        if fly2 in transformed_positions and frame_idx < len(transformed_positions[fly2]):
-                            x2, y2, _ = transformed_positions[fly2][frame_idx]
-                                
-            if xs and ys:
-                # Calculate maximum distance between any two flies in the group
-                max_distance = 0
-                positions = list(zip(xs, ys))
-                for i in range(len(positions)):
-                    for j in range(i+1, len(positions)):
-                        x1, y1 = positions[i]
-                        x2, y2 = positions[j]
-                        distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
-                        if distance > max_distance:
-                            max_distance = distance
+                    x, y, _ = transformed_positions[fly_id][frame_idx]
+                    xs.append(x)
+                    ys.append(y)
+                    group_positions.append((x, y))
+            
+            # Only draw if we have valid positions
+            if not group_positions:
+                continue
                 
-                # Only draw box if flies are within 300 pixels of each other
-                if max_distance <= 300:
-                    margin = 60
-                    min_x_box = max(0, int(min(xs) - margin))
-                    max_x_box = min(frame.shape[1], int(max(xs) + margin))
-                    min_y_box = max(0, int(min(ys) - margin))
-                    max_y_box = min(frame.shape[0], int(max(ys) + margin))
-                    group_size = len(group)
-                    if group_size == 2:
-                        box_color = (0, 128, 0)  # Green
-                    elif group_size == 3:
-                        box_color = (0, 255, 255)  # Yellow
-                    else:
-                        box_color = (0, 0, 255)    # Red
-
-                    cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, 3)
-
+            # Calculate group statistics
+            min_x = min(xs)
+            max_x = max(xs)
+            min_y = min(ys)
+            max_y = max(ys)
+            
+            # Calculate maximum distance between any two flies in group
+            max_distance = 0
+            for i in range(len(group_positions)):
+                for j in range(i+1, len(group_positions)):
+                    x1, y1 = group_positions[i]
+                    x2, y2 = group_positions[j]
+                    distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                    if distance > max_distance:
+                        max_distance = distance
+            
+            # Only draw box if flies are reasonably close (300px threshold)
+            if max_distance <= 300:
+                margin = 60  # Padding around flies
+                min_x_box = max(0, int(min_x - margin))
+                max_x_box = min(frame.shape[1], int(max_x + margin))
+                min_y_box = max(0, int(min_y - margin))
+                max_y_box = min(frame.shape[0], int(max_y + margin))
+                
+                # Color coding based on group size
+                group_size = len(group)
+                if group_size == 2:
+                    box_color = (0, 128, 0)  # Green
+                elif group_size == 3:
+                    box_color = (0, 255, 255)  # Yellow
+                else:
+                    box_color = (0, 0, 255)  # Red
+                
+                # Draw the rectangle
+                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, 3)
+                
+                # Optional: Add group size label
+                if self.draw_labels:
+                    label_pos = (min_x_box + 10, min_y_box + 30)
+                    cv2.putText(frame, f"Group: {group_size}", label_pos, 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
+                
 class VideoPlayerWindow(QWidget):
     def __init__(self, video_path):
         super().__init__()
