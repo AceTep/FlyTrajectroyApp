@@ -541,6 +541,9 @@ class VideoPlayerWindow(QWidget):
         self.fullscreen_button = create_button("Fullscreen")
         self.skip_back_button = create_button("<< 5s")
         self.skip_forward_button = create_button(">> 5s")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        self.skip_back_button.clicked.connect(self.skip_back)
+        self.skip_forward_button.clicked.connect(self.skip_forward)
 
         for btn in [self.play_button, self.pause_button, self.stop_button, 
                    self.skip_back_button, self.skip_forward_button, self.fullscreen_button]:
@@ -570,11 +573,58 @@ class VideoPlayerWindow(QWidget):
         self.slider.valueChanged.connect(self.seek_video)
         layout.addWidget(self.slider)
 
-        self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-        self.media_player.setVideoOutput(self.video_widget)
-        self.media_player.positionChanged.connect(self.update_slider_position)
-        self.media_player.durationChanged.connect(self.update_slider_range)
-        self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(os.path.abspath(video_path))))
+        self.media_player = None
+        
+        try:
+            self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+            self.media_player.setVideoOutput(self.video_widget)
+            self.media_player.positionChanged.connect(self.update_slider_position)
+            self.media_player.durationChanged.connect(self.update_slider_range)
+            
+            media_content = QMediaContent(QUrl.fromLocalFile(os.path.abspath(video_path)))
+            self.media_player.setMedia(media_content)
+            
+            # Connect state changed signal
+            self.media_player.stateChanged.connect(self.handle_state_change)
+        except Exception as e:
+            print(f"Error initializing media player: {str(e)}")
+            self.media_player = None
+
+    def handle_state_change(self, state):
+        """Handle media player state changes"""
+        if state == QMediaPlayer.StoppedState and hasattr(self, 'media_player') and self.media_player:
+            self.cleanup()
+
+    def cleanup(self):
+        """Safely clean up media player resources"""
+        try:
+            if hasattr(self, 'media_player') and self.media_player:
+                # Disconnect signals first
+                try:
+                    self.media_player.positionChanged.disconnect()
+                    self.media_player.durationChanged.disconnect()
+                    self.media_player.stateChanged.disconnect()
+                except:
+                    pass
+                
+                # Stop and clear media
+                self.media_player.stop()
+                self.media_player.setMedia(QMediaContent())
+                
+                # Delete the media player
+                self.media_player.deleteLater()
+                self.media_player = None
+        except Exception as e:
+            print(f"Error during cleanup: {str(e)}")
+
+    def closeEvent(self, event):
+        """Handle window closing"""
+        try:
+            self.cleanup()
+        except Exception as e:
+            print(f"Error during window close: {str(e)}")
+        finally:
+            event.accept()
 
     def play_video(self): self.media_player.play()
     def pause_video(self): self.media_player.pause()
@@ -585,6 +635,7 @@ class VideoPlayerWindow(QWidget):
     def update_slider_position(self, position): self.slider.setValue(position)
     def update_slider_range(self, duration): self.slider.setRange(0, duration)
     def toggle_fullscreen(self): self.showFullScreen() if not self.isFullScreen() else self.showNormal()
+
 
 
 class CSVFilterApp(QWidget):
@@ -1077,7 +1128,14 @@ class CSVFilterApp(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load calibration:\n{str(e)}")
 
-                
+    def closeEvent(self, event):
+        if hasattr(self, 'video_popup'):
+            try:
+                self.video_popup.cleanup()
+                self.video_popup.close()
+            except:
+                pass
+        event.accept()
     def generate_video(self):
         if self.all_flies_df is None or not self.edgelist_path:
             QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs and edgelist before generating the video.")
@@ -1147,11 +1205,28 @@ class CSVFilterApp(QWidget):
         QMessageBox.information(self, "Success", f"Video saved to: {output_path}\nTime taken: {elapsed_time / 60:.2f} minutes")
 
     def play_embedded_video(self):
-        if self.generated_video_path and os.path.exists(self.generated_video_path):
+        if not hasattr(self, 'generated_video_path') or not os.path.exists(self.generated_video_path):
+            QMessageBox.warning(self, "Error", "Generated video not found.")
+            return
+
+        # Close existing window if open
+        if hasattr(self, 'video_popup'):
+            try:
+                self.video_popup.cleanup()
+                self.video_popup.close()
+                self.video_popup.deleteLater()
+            except Exception as e:
+                print(f"Error closing existing video window: {str(e)}")
+            finally:
+                if hasattr(self, 'video_popup'):
+                    del self.video_popup
+
+        # Create new window
+        try:
             self.video_popup = VideoPlayerWindow(self.generated_video_path)
             self.video_popup.show()
-        else:
-            QMessageBox.warning(self, "Error", "Generated video not found.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open video player: {str(e)}")
 
 
 if __name__ == "__main__":
