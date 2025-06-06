@@ -222,8 +222,12 @@ class VideoProcessingThread(QThread):
 
             transformed = {}
             for fly_id, df in fly_data.items():
+                # First apply calibration
                 scaled_x = (df["pos x"].values * x_px_ratio) + min_x
                 scaled_y = (df["pos y"].values * y_px_ratio) + min_y
+                # Then apply scale factor
+                scaled_x = scaled_x * self.scale_factor
+                scaled_y = scaled_y * self.scale_factor
                 ori = df["ori"].values
                 transformed[fly_id] = np.stack([scaled_x, scaled_y, ori], axis=1)
 
@@ -249,8 +253,6 @@ class VideoProcessingThread(QThread):
                 transformed[fly_id] = np.stack([x, y, ori], axis=1)
 
             return transformed, min(len(df) for df in fly_data.values())
-
-
 
 
     def run(self):
