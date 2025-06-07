@@ -222,10 +222,8 @@ class VideoProcessingThread(QThread):
 
             transformed = {}
             for fly_id, df in fly_data.items():
-                # First apply calibration
                 scaled_x = (df["pos x"].values * x_px_ratio) + min_x
                 scaled_y = (df["pos y"].values * y_px_ratio) + min_y
-                # Then apply scale factor
                 scaled_x = scaled_x * self.scale_factor
                 scaled_y = scaled_y * self.scale_factor
                 ori = df["ori"].values
@@ -562,7 +560,8 @@ class VideoPlayerWindow(QWidget):
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
 
         self.fly_grid_button = create_button("Show Fly Grid")
-        self.fly_grid_button.clicked.connect(self.show_fly_grid)
+        self.fly_grid_button.setCheckable(True)
+        self.fly_grid_button.clicked.connect(self.toggle_fly_grid)
         control_layout.addWidget(self.fly_grid_button)
 
 
@@ -649,18 +648,23 @@ class VideoPlayerWindow(QWidget):
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
         self.next_frame()
 
-        # ✅ NEW: keep the grid view in sync
         if hasattr(self, 'fly_grid_window'):
             self.fly_grid_window.set_frame_index(self.frame_idx)
 
 
+    def toggle_fly_grid(self, checked):
+        if checked:
+            self.fly_grid_button.setText("Hide Fly Grid")
+            self.show_fly_grid()
+        else:
+            self.fly_grid_button.setText("Show Fly Grid")
+            self.hide_fly_grid()
+
     def show_fly_grid(self):
         if not hasattr(self, 'fly_grid_window'):
             self.fly_grid_window = FlyGridWindow(self.video_path, self.fly_positions, self.frame_idx, self.fps)
-        # Always update frame index to match
         self.fly_grid_window.set_frame_index(self.frame_idx)
 
-        # If video is playing, start the grid too
         if not self.paused:
             self.fly_grid_window.start()
         else:
@@ -668,7 +672,18 @@ class VideoPlayerWindow(QWidget):
 
         self.fly_grid_window.show()
 
+    def hide_fly_grid(self):
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.close()
+            del self.fly_grid_window
 
+    def closeEvent(self, event):
+        self.pause()
+        if self.cap.isOpened():
+            self.cap.release()
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.close()
+        event.accept()
 
 
     def next_frame(self):
@@ -695,12 +710,7 @@ class VideoPlayerWindow(QWidget):
         else:
             self.showFullScreen()
 
-    def closeEvent(self, event):
-        self.pause()
-        if self.cap.isOpened():
-            self.cap.release()
-        event.accept()
-        
+    
     def resizeEvent(self, event):
         if hasattr(self, 'cap') and self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
@@ -716,13 +726,11 @@ class VideoPlayerWindow(QWidget):
                 ))
         super().resizeEvent(event)
 
-
 class FlyGridWindow(QWidget):
     def __init__(self, video_path, fly_positions, frame_idx, fps):
         super().__init__()
         self.setWindowTitle("Fly Grid View")
 
-        # OPEN NEW CAPTURE INSTANCE
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
             raise IOError(f"Cannot open video: {video_path}")
@@ -730,19 +738,47 @@ class FlyGridWindow(QWidget):
         self.fly_positions = fly_positions
         self.frame_idx = frame_idx
         self.fps = fps
-        self.setStyleSheet(f"background-color: {DARK_GRAY};")
+        self.setStyleSheet(f"""
+            background-color: {DARK_GRAY};
+            QLabel {{
+                color: white;
+                font-size: 12px;
+            }}
+        """)
         self.layout = QGridLayout(self)
+        self.layout.setSpacing(10)
         self.labels = {}
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_grid)
         self.is_playing = False
 
-        for idx, fly_id in enumerate(sorted(self.fly_positions.keys())):
-            label = QLabel()
-            label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet("background-color: black;")
-            self.layout.addWidget(label, idx // 4, idx % 4)
-            self.labels[fly_id] = label
+        # Sort fly IDs numerically (fly1, fly2, etc.)
+        sorted_fly_ids = sorted(
+            fly_positions.keys(),
+            key=lambda x: int(x[3:]) if x.lower().startswith('fly') and x[3:].isdigit() else x
+        )
+
+        for idx, fly_id in enumerate(sorted_fly_ids):
+            # Create container widget for each fly
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(5)
+
+            # Add fly ID label
+            id_label = QLabel(fly_id)
+            id_label.setAlignment(Qt.AlignCenter)
+            id_label.setStyleSheet("font-weight: bold;")
+            container_layout.addWidget(id_label)
+
+            # Add video feed label
+            video_label = QLabel()
+            video_label.setAlignment(Qt.AlignCenter)
+            video_label.setStyleSheet("background-color: black;")
+            container_layout.addWidget(video_label)
+
+            self.layout.addWidget(container, idx // 4, idx % 4)
+            self.labels[fly_id] = video_label  # Store reference to video label
 
     def start(self):
         if not self.is_playing:
@@ -763,7 +799,9 @@ class FlyGridWindow(QWidget):
         self.frame_idx = frame_idx
         self.update_grid()
 
+
     def closeEvent(self, event):
+        self.pause()
         if self.cap.isOpened():
             self.cap.release()
         event.accept()
@@ -774,9 +812,11 @@ class FlyGridWindow(QWidget):
         ret, frame = self.cap.read()
         if not ret:
             return
-        for fly_id, label in self.labels.items():
+
+        for fly_id, video_label in self.labels.items():
             if fly_id not in self.fly_positions or self.frame_idx >= len(self.fly_positions[fly_id]):
                 continue
+
             x, y, _ = self.fly_positions[fly_id][self.frame_idx]
             x, y = int(x), int(y)
             crop_size = 100
@@ -787,11 +827,14 @@ class FlyGridWindow(QWidget):
             y2 = min(frame.shape[0], y + crop_size)
 
             fly_crop = frame[y1:y2, x1:x2]
+            if fly_crop.size == 0:
+                continue
+
             fly_crop = cv2.resize(fly_crop, (160, 160))
             rgb = cv2.cvtColor(fly_crop, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
             qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-            label.setPixmap(QPixmap.fromImage(qimg))
+            video_label.setPixmap(QPixmap.fromImage(qimg))
 
         self.frame_idx += 1
 
@@ -1160,16 +1203,13 @@ class CSVFilterApp(QWidget):
             self.screenshot_interval_min = self.screenshot_interval_slider.value()
             self.draw_petri_circle = chk_draw_circle.isChecked()
 
-            # Get min interaction duration
             try:
                 self.min_edge_duration = int(self.min_duration_input.text())
             except ValueError:
                 self.min_edge_duration = 0
 
-            # Get color code edges setting
             self.color_code_edges = self.color_code_edges_checkbox.isChecked()
 
-            # Get time range settings
             try:
                 self.start_time_min = float(self.start_time_edit.text()) if self.start_time_edit.text() else 0
             except ValueError:
@@ -1187,14 +1227,12 @@ class CSVFilterApp(QWidget):
                 all_data = []
                 self.fly_colors.clear()
                 
-                # Clear only the CSV file checkboxes (preserve video, edgelist, calibration)
                 for fly_id in list(self.file_checkboxes.keys()):
                     widget = self.file_checkboxes[fly_id]
-                    if widget:  # Check if widget exists before trying to remove it
+                    if widget:  
                         widget.setParent(None)
                     del self.file_checkboxes[fly_id]
                 
-                # Load each CSV file and create a checkbox for it
                 for file_path in file_paths:
                     try:
                         df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
@@ -1203,7 +1241,6 @@ class CSVFilterApp(QWidget):
                         all_data.append(df)
                         self.fly_colors[fly_id] = generate_fly_color(fly_id)
                         
-                        # Create checkbox for this file
                         chk = QCheckBox(fly_id)
                         chk.setChecked(True)
                         chk.setStyleSheet(f"""
@@ -1223,10 +1260,8 @@ class CSVFilterApp(QWidget):
                         print(f"Error loading file {file_path}: {str(e)}")
                         continue
                         
-                # Combine all loaded data into one dataframe
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
                 
-                # Enable video button if we have both flies and edgelist
                 if self.edgelist_path:
                     self.video_button.setEnabled(True)
                     
@@ -1239,11 +1274,9 @@ class CSVFilterApp(QWidget):
             self.file_paths['video'] = video_path
             video_name = os.path.basename(video_path)
             
-            # Remove old checkbox if exists
             if self.video_checkbox:
                 self.video_checkbox.setParent(None)
             
-            # Create new checkbox
             self.video_checkbox = QCheckBox(f"Video: {video_name}")
             self.video_checkbox.setChecked(True)
             self.video_checkbox.setStyleSheet(f"""
@@ -1267,11 +1300,9 @@ class CSVFilterApp(QWidget):
             self.file_paths['edgelist'] = edgelist_path
             edgelist_name = os.path.basename(edgelist_path)
             
-            # Remove old checkbox if exists
             if self.edgelist_checkbox:
                 self.edgelist_checkbox.setParent(None)
             
-            # Create new checkbox
             self.edgelist_checkbox = QCheckBox(f"Edgelist: {edgelist_name}")
             self.edgelist_checkbox.setChecked(True)
             self.edgelist_checkbox.setStyleSheet(f"""
@@ -1305,11 +1336,9 @@ class CSVFilterApp(QWidget):
                 self.file_paths['calibration'] = path
                 cal_name = os.path.basename(path)
                 
-                # Remove old checkbox if exists
                 if self.calibration_checkbox:
                     self.calibration_checkbox.setParent(None)
                 
-                # Create new checkbox
                 self.calibration_checkbox = QCheckBox(f"Calibration: {cal_name}")
                 self.calibration_checkbox.setChecked(True)
                 self.calibration_checkbox.setStyleSheet(f"""
@@ -1328,26 +1357,21 @@ class CSVFilterApp(QWidget):
                 QMessageBox.critical(self, "Error", f"Failed to load calibration:\n{str(e)}")
 
     def generate_video(self):
-        # Check if required files are loaded and checked
         if self.all_flies_df is None:
             QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs before generating the video.")
             return
         
-        # Check edgelist
         if not self.file_paths['edgelist'] or (self.edgelist_checkbox and not self.edgelist_checkbox.isChecked()):
             QMessageBox.warning(self, "Missing Edgelist", "Edgelist is required but not selected or unchecked.")
             return
         
-        # Get checked fly IDs
         checked_ids = [fly_id for fly_id, chk in self.file_checkboxes.items() if chk.isChecked()]
         if not checked_ids:
             QMessageBox.warning(self, "No Files Selected", "Please check at least one fly CSV to include in the video.")
             return
         
-        # Filter dataframe
         filtered_df = self.all_flies_df[self.all_flies_df['fly_id'].isin(checked_ids)].copy()
         
-        # Determine video source
         use_blank = True
         video_path = None
         
@@ -1357,12 +1381,10 @@ class CSVFilterApp(QWidget):
         else:
             QMessageBox.information(self, "No Video", "No background video selected or unchecked. Using blank white background.")
         
-        # Determine calibration
         calibration_values = None
         if self.file_paths['calibration'] and (not self.calibration_checkbox or self.calibration_checkbox.isChecked()):
             calibration_values = self.calibration_values
         
-        # Start video generation
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
         
@@ -1428,7 +1450,6 @@ class CSVFilterApp(QWidget):
             QMessageBox.warning(self, "Error", "Generated video not found.")
             return
 
-        # Close existing window if open
         if hasattr(self, 'video_popup'):
             try:
                 self.video_popup.cleanup()
@@ -1440,16 +1461,13 @@ class CSVFilterApp(QWidget):
                 if hasattr(self, 'video_popup'):
                     del self.video_popup
 
-        # 🧠 STEP 1: Get video resolution
         cap = cv2.VideoCapture(self.generated_video_path)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
 
-        # 🧠 STEP 2: Get fly positions (reuse logic from VideoProcessingThread)
         fly_positions, _ = self.video_thread.transform_fly_positions(frame_width, frame_height)
 
-        # 🧠 STEP 3: Open video player and pass fly positions
         try:
             self.video_popup = VideoPlayerWindow(self.generated_video_path, fly_positions)
             self.video_popup.show()
