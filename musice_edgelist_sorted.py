@@ -9,17 +9,17 @@ import traceback
 from collections import defaultdict, deque
 import tomllib
 from pathlib import Path
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl, QTimer
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
     QFileDialog, QTextEdit, QMessageBox, QProgressDialog,
     QHBoxLayout, QStyle, QSlider, QLabel, QDialog,
     QCheckBox, QDialogButtonBox, QTabWidget, QComboBox, 
-    QLineEdit, QFormLayout, QFrame, QScrollArea
+    QLineEdit, QFormLayout, QFrame, QScrollArea,QSizePolicy
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
-from PyQt5.QtGui import QFont, QPalette, QColor
+from PyQt5.QtGui import QFont, QPalette, QColor,QPixmap, QImage, QIcon
 import hashlib
 
 DARK_GRAY = "#2D2D2D"
@@ -503,14 +503,30 @@ class VideoPlayerWindow(QWidget):
         self.setWindowTitle("Video Player")
         self.resize(800, 600)
         self.setStyleSheet(f"background-color: {DARK_GRAY};")
-        
+
+        self.video_path = video_path
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            raise IOError(f"Cannot open video: {video_path}")
+
+        self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.duration_ms = int(self.total_frames * 1000 / self.fps)
+
+        self.frame_idx = 0
+        self.paused = True
+
+        # UI
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        
-        # Video widget
-        self.video_widget = QVideoWidget()
-        self.video_widget.setStyleSheet(f"background-color: {DARK_GRAY};")
-        layout.addWidget(self.video_widget)
+
+        # Video display
+        self.video_label = QLabel()
+        self.video_label.setStyleSheet(f"background-color: {DARK_GRAY};")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # ADD THIS
+        layout.addWidget(self.video_label, stretch=1)  # ADD stretch=1 to make it expand
+        layout.addWidget(self.video_label)  
 
         # Control panel
         control_panel = QFrame()
@@ -523,38 +539,42 @@ class VideoPlayerWindow(QWidget):
         """)
         control_layout = QHBoxLayout(control_panel)
         control_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Control buttons
+
+        # Buttons
         self.play_button = QPushButton()
-        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.play_button.setIcon(self.style().standardIcon(QPushButton().style().SP_MediaPlay))
         self.play_button.setStyleSheet("QPushButton { padding: 8px; }")
-        self.play_button.clicked.connect(self.play_video)
-        
+        self.play_button.clicked.connect(self.play)
+
         self.pause_button = QPushButton()
-        self.pause_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.pause_button.setIcon(self.style().standardIcon(QPushButton().style().SP_MediaPause))
         self.pause_button.setStyleSheet("QPushButton { padding: 8px; }")
-        self.pause_button.clicked.connect(self.pause_video)
-        
+        self.pause_button.clicked.connect(self.pause)
+
         self.stop_button = QPushButton()
-        self.stop_button.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
+        self.stop_button.setIcon(self.style().standardIcon(QPushButton().style().SP_MediaStop))
         self.stop_button.setStyleSheet("QPushButton { padding: 8px; }")
-        self.stop_button.clicked.connect(self.stop_video)
-        
+        self.stop_button.clicked.connect(self.stop)
+
         self.fullscreen_button = create_button("Fullscreen")
-        self.skip_back_button = create_button("<< 5s")
-        self.skip_forward_button = create_button(">> 5s")
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+
+        self.skip_back_button = create_button("<< 5s")
         self.skip_back_button.clicked.connect(self.skip_back)
+
+        self.skip_forward_button = create_button(">> 5s")
         self.skip_forward_button.clicked.connect(self.skip_forward)
 
-        for btn in [self.play_button, self.pause_button, self.stop_button, 
-                   self.skip_back_button, self.skip_forward_button, self.fullscreen_button]:
+        for btn in [self.play_button, self.pause_button, self.stop_button,
+                    self.skip_back_button, self.skip_forward_button, self.fullscreen_button]:
             control_layout.addWidget(btn)
 
         layout.addWidget(control_panel)
 
-        # Progress slider
+        # Slider
         self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, self.duration_ms)
+        self.slider.sliderReleased.connect(self.seek_video)
         self.slider.setStyleSheet(f"""
             QSlider::groove:horizontal {{
                 height: 8px;
@@ -571,72 +591,89 @@ class VideoPlayerWindow(QWidget):
                 background: {ACCENT_COLOR};
             }}
         """)
-        self.slider.setRange(0, 100)
-        self.slider.valueChanged.connect(self.seek_video)
         layout.addWidget(self.slider)
 
-        self.media_player = None
-        
-        try:
-            self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-            self.media_player.setVideoOutput(self.video_widget)
-            self.media_player.positionChanged.connect(self.update_slider_position)
-            self.media_player.durationChanged.connect(self.update_slider_range)
-            
-            media_content = QMediaContent(QUrl.fromLocalFile(os.path.abspath(video_path)))
-            self.media_player.setMedia(media_content)
-            
-            # Connect state changed signal
-            self.media_player.stateChanged.connect(self.handle_state_change)
-        except Exception as e:
-            print(f"Error initializing media player: {str(e)}")
-            self.media_player = None
+        # Timer
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.next_frame)
 
-    def handle_state_change(self, state):
-        """Handle media player state changes"""
-        if state == QMediaPlayer.StoppedState and hasattr(self, 'media_player') and self.media_player:
-            self.cleanup()
+    def play(self):
+        if not self.timer.isActive():
+            self.timer.start(int(1000 / self.fps))
+        self.paused = False
 
-    def cleanup(self):
-        """Safely clean up media player resources"""
-        try:
-            if hasattr(self, 'media_player') and self.media_player:
-                # Disconnect signals first
-                try:
-                    self.media_player.positionChanged.disconnect()
-                    self.media_player.durationChanged.disconnect()
-                    self.media_player.stateChanged.disconnect()
-                except:
-                    pass
-                
-                # Stop and clear media
-                self.media_player.stop()
-                self.media_player.setMedia(QMediaContent())
-                
-                # Delete the media player
-                self.media_player.deleteLater()
-                self.media_player = None
-        except Exception as e:
-            print(f"Error during cleanup: {str(e)}")
+    def pause(self):
+        self.timer.stop()
+        self.paused = True
+
+    def stop(self):
+        self.pause()
+        self.frame_idx = 0
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+        self.next_frame()
+
+    def skip_back(self):
+        target = max(0, self.frame_idx - int(5 * self.fps))
+        self.frame_idx = target
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+        self.next_frame()
+
+    def skip_forward(self):
+        target = min(self.total_frames - 1, self.frame_idx + int(5 * self.fps))
+        self.frame_idx = target
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+        self.next_frame()
+
+    def seek_video(self):
+        ms = self.slider.value()
+        self.frame_idx = int((ms / 1000) * self.fps)
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+        self.next_frame()
+
+    def next_frame(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            self.stop()
+            return
+
+        self.frame_idx += 1
+        current_ms = int((self.frame_idx / self.fps) * 1000)
+        self.slider.setValue(current_ms)
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame_rgb.shape
+        bytes_per_line = ch * w
+        qimg = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        self.video_label.setPixmap(QPixmap.fromImage(qimg).scaled(
+            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     def closeEvent(self, event):
-        """Handle window closing"""
-        try:
-            self.cleanup()
-        except Exception as e:
-            print(f"Error during window close: {str(e)}")
-        finally:
-            event.accept()
-
-    def play_video(self): self.media_player.play()
-    def pause_video(self): self.media_player.pause()
-    def stop_video(self): self.media_player.stop()
-    def skip_back(self): self.media_player.setPosition(max(0, self.media_player.position() - 5000))
-    def skip_forward(self): self.media_player.setPosition(min(self.media_player.duration(), self.media_player.position() + 5000))
-    def seek_video(self, position): self.media_player.setPosition(position)
-    def update_slider_position(self, position): self.slider.setValue(position)
-    def update_slider_range(self, duration): self.slider.setRange(0, duration)
-    def toggle_fullscreen(self): self.showFullScreen() if not self.isFullScreen() else self.showNormal()
+        self.pause()
+        if self.cap.isOpened():
+            self.cap.release()
+        event.accept()
+        
+    def resizeEvent(self, event):
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+            self.cap.grab()
+            ret, frame = self.cap.retrieve()
+            if ret:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = frame_rgb.shape
+                bytes_per_line = ch * w
+                qimg = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                self.video_label.setPixmap(QPixmap.fromImage(qimg).scaled(
+                    self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                ))
+        super().resizeEvent(event)
 
 
 
@@ -849,6 +886,15 @@ class CSVFilterApp(QWidget):
         }
         self.file_checkboxes = {}
 
+        self.video_checkbox = None
+        self.edgelist_checkbox = None
+        self.calibration_checkbox = None
+        self.file_paths = {
+            'video': None,
+            'edgelist': None,
+            'calibration': None
+        }
+
         # Progress dialog
         self.progress_dialog = QProgressDialog("Processing video...", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowTitle("Video Progress")
@@ -981,6 +1027,8 @@ class CSVFilterApp(QWidget):
         layout.addWidget(buttons)
         dialog.setLayout(layout)
 
+
+
         if dialog.exec_():
             self.use_blank_background = chk_blank.isChecked()
             self.draw_boxes = chk_boxes.isChecked()
@@ -1019,48 +1067,66 @@ class CSVFilterApp(QWidget):
                 all_data = []
                 self.fly_colors.clear()
                 
-                for i in reversed(range(self.file_list_layout.count())): 
-                    self.file_list_layout.itemAt(i).widget().setParent(None)
-                self.file_checkboxes.clear()
+                # Clear only the CSV file checkboxes (preserve video, edgelist, calibration)
+                for fly_id in list(self.file_checkboxes.keys()):
+                    widget = self.file_checkboxes[fly_id]
+                    if widget:  # Check if widget exists before trying to remove it
+                        widget.setParent(None)
+                    del self.file_checkboxes[fly_id]
                 
-                for idx, file_path in enumerate(file_paths):
-                    df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
-                    fly_id = os.path.splitext(os.path.basename(file_path))[0]
-                    df["fly_id"] = fly_id
-                    all_data.append(df)
-                    self.fly_colors[fly_id] = generate_fly_color(fly_id)
-                    
-                    chk = QCheckBox(fly_id)
-                    chk.setChecked(True)
-                    chk.setStyleSheet(f"""
-                        QCheckBox {{
-                            color: {TEXT_COLOR};
-                            spacing: 8px;
-                        }}
-                        QCheckBox::indicator {{
-                            width: 16px;
-                            height: 16px;
-                        }}
-                    """)
-                    self.file_list_layout.addWidget(chk)
-                    self.file_checkboxes[fly_id] = chk
-                    
+                # Load each CSV file and create a checkbox for it
+                for file_path in file_paths:
+                    try:
+                        df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
+                        fly_id = os.path.splitext(os.path.basename(file_path))[0]
+                        df["fly_id"] = fly_id
+                        all_data.append(df)
+                        self.fly_colors[fly_id] = generate_fly_color(fly_id)
+                        
+                        # Create checkbox for this file
+                        chk = QCheckBox(fly_id)
+                        chk.setChecked(True)
+                        chk.setStyleSheet(f"""
+                            QCheckBox {{
+                                color: {TEXT_COLOR};
+                                spacing: 8px;
+                            }}
+                            QCheckBox::indicator {{
+                                width: 16px;
+                                height: 16px;
+                            }}
+                        """)
+                        self.file_list_layout.addWidget(chk)
+                        self.file_checkboxes[fly_id] = chk
+                        
+                    except Exception as e:
+                        print(f"Error loading file {file_path}: {str(e)}")
+                        continue
+                        
+                # Combine all loaded data into one dataframe
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
+                
+                # Enable video button if we have both flies and edgelist
                 if self.edgelist_path:
                     self.video_button.setEnabled(True)
                     
-                
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load CSVs:\n{str(e)}")
-                
+    
     def load_video(self):
         video_path, _ = QFileDialog.getOpenFileName(self, "Select Background Video", "", "Video Files (*.mp4 *.avi *.mov)")
         if video_path:
-            self.video_path = video_path
+            self.file_paths['video'] = video_path
             video_name = os.path.basename(video_path)
-            chk = QCheckBox(f"Video: {video_name}")
-            chk.setChecked(True)
-            chk.setStyleSheet(f"""
+            
+            # Remove old checkbox if exists
+            if self.video_checkbox:
+                self.video_checkbox.setParent(None)
+            
+            # Create new checkbox
+            self.video_checkbox = QCheckBox(f"Video: {video_name}")
+            self.video_checkbox.setChecked(True)
+            self.video_checkbox.setStyleSheet(f"""
                 QCheckBox {{
                     color: {TEXT_COLOR};
                     spacing: 8px;
@@ -1070,19 +1136,25 @@ class CSVFilterApp(QWidget):
                     height: 16px;
                 }}
             """)
-            self.file_list_layout.addWidget(chk)
+            self.file_list_layout.addWidget(self.video_checkbox)
             
-            if self.all_flies_df is not None and self.edgelist_path:
+            if self.all_flies_df is not None and self.file_paths['edgelist']:
                 self.video_button.setEnabled(True)
-                
+
     def load_edgelist(self):
         edgelist_path, _ = QFileDialog.getOpenFileName(self, "Select Edgelist CSV", "", "CSV Files (*.csv)")
         if edgelist_path:
-            self.edgelist_path = edgelist_path
+            self.file_paths['edgelist'] = edgelist_path
             edgelist_name = os.path.basename(edgelist_path)
-            chk = QCheckBox(f"Edgelist: {edgelist_name}")
-            chk.setChecked(True)
-            chk.setStyleSheet(f"""
+            
+            # Remove old checkbox if exists
+            if self.edgelist_checkbox:
+                self.edgelist_checkbox.setParent(None)
+            
+            # Create new checkbox
+            self.edgelist_checkbox = QCheckBox(f"Edgelist: {edgelist_name}")
+            self.edgelist_checkbox.setChecked(True)
+            self.edgelist_checkbox.setStyleSheet(f"""
                 QCheckBox {{
                     color: {TEXT_COLOR};
                     spacing: 8px;
@@ -1092,11 +1164,11 @@ class CSVFilterApp(QWidget):
                     height: 16px;
                 }}
             """)
-            self.file_list_layout.addWidget(chk)
+            self.file_list_layout.addWidget(self.edgelist_checkbox)
             
             if self.all_flies_df is not None:
                 self.video_button.setEnabled(True)
-                
+
     def load_calibration(self):
         path, _ = QFileDialog.getOpenFileName(self)
         if path:
@@ -1110,12 +1182,17 @@ class CSVFilterApp(QWidget):
                     'x_px_ratio': config['x_px_ratio'],
                     'y_px_ratio': config['y_px_ratio']
                 })
-                self.calibration_path = path
-                
+                self.file_paths['calibration'] = path
                 cal_name = os.path.basename(path)
-                chk = QCheckBox(f"Calibration: {cal_name}")
-                chk.setChecked(True)
-                chk.setStyleSheet(f"""
+                
+                # Remove old checkbox if exists
+                if self.calibration_checkbox:
+                    self.calibration_checkbox.setParent(None)
+                
+                # Create new checkbox
+                self.calibration_checkbox = QCheckBox(f"Calibration: {cal_name}")
+                self.calibration_checkbox.setChecked(True)
+                self.calibration_checkbox.setStyleSheet(f"""
                     QCheckBox {{
                         color: {TEXT_COLOR};
                         spacing: 8px;
@@ -1125,51 +1202,59 @@ class CSVFilterApp(QWidget):
                         height: 16px;
                     }}
                 """)
-                self.file_list_layout.addWidget(chk)
+                self.file_list_layout.addWidget(self.calibration_checkbox)
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load calibration:\n{str(e)}")
 
-    def closeEvent(self, event):
-        if hasattr(self, 'video_popup'):
-            try:
-                self.video_popup.cleanup()
-                self.video_popup.close()
-            except:
-                pass
-        event.accept()
     def generate_video(self):
-        if self.all_flies_df is None or not self.edgelist_path:
-            QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs and edgelist before generating the video.")
+        # Check if required files are loaded and checked
+        if self.all_flies_df is None:
+            QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs before generating the video.")
             return
-        checked_ids = [fly_id for fly_id, chk in self.file_checkboxes.items() if chk.isChecked()]
-        filtered_df = self.all_flies_df[self.all_flies_df['fly_id'].isin(checked_ids)]
         
-        if len(filtered_df) == 0:
+        # Check edgelist
+        if not self.file_paths['edgelist'] or (self.edgelist_checkbox and not self.edgelist_checkbox.isChecked()):
+            QMessageBox.warning(self, "Missing Edgelist", "Edgelist is required but not selected or unchecked.")
+            return
+        
+        # Get checked fly IDs
+        checked_ids = [fly_id for fly_id, chk in self.file_checkboxes.items() if chk.isChecked()]
+        if not checked_ids:
             QMessageBox.warning(self, "No Files Selected", "Please check at least one fly CSV to include in the video.")
             return
         
-        if not self.video_path:
-            use_blank = True
-            QMessageBox.information(self, "No Video", "No background video loaded. Using blank white background.")
+        # Filter dataframe
+        filtered_df = self.all_flies_df[self.all_flies_df['fly_id'].isin(checked_ids)].copy()
+        
+        # Determine video source
+        use_blank = True
+        video_path = None
+        
+        if self.file_paths['video'] and (not self.video_checkbox or self.video_checkbox.isChecked()):
+            use_blank = False
+            video_path = self.file_paths['video']
         else:
-            use_blank = self.use_blank_background
-
-        final_draw_boxes = True
-        final_draw_arrows = self.draw_arrows
-        final_draw_boxes = self.draw_boxes
-        min_duration = getattr(self, 'min_edge_duration', 0)
-        color_edges = getattr(self, 'color_code_edges', False)
-
-
+            QMessageBox.information(self, "No Video", "No background video selected or unchecked. Using blank white background.")
+        
+        # Determine calibration
+        calibration_values = None
+        if self.file_paths['calibration'] and (not self.calibration_checkbox or self.calibration_checkbox.isChecked()):
+            calibration_values = self.calibration_values
+        
+        # Start video generation
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
+        
         self.video_thread = VideoProcessingThread(
-            self.all_flies_df, self.video_path, self.edgelist_path, self.fly_colors,
+            filtered_df,
+            video_path,
+            self.file_paths['edgelist'],
+            self.fly_colors,
             use_blank=use_blank,
-            draw_boxes=final_draw_boxes,
+            draw_boxes=self.draw_boxes,
             draw_labels=self.show_labels,
-            draw_arrows=final_draw_arrows,
+            draw_arrows=self.draw_arrows,
             show_frame_counter=self.show_frame_counter,
             scale_factor=self.scale_factor,
             edge_persistence_seconds=self.edge_persistence_seconds,
@@ -1179,15 +1264,27 @@ class CSVFilterApp(QWidget):
             end_time_min=self.end_time_min,
             fly_size=13,
             draw_petri_circle=self.draw_petri_circle,
-            min_edge_duration=min_duration,
-            color_code_edges=color_edges,
-            calibration_values=self.calibration_values) 
+            min_edge_duration=getattr(self, 'min_edge_duration', 0),
+            color_code_edges=getattr(self, 'color_code_edges', False),
+            calibration_values=calibration_values)
 
         self.video_thread.update_progress.connect(self.show_progress)
         self.video_thread.update_progress_bar.connect(self.progress_dialog.setValue)
         self.video_thread.video_saved.connect(self.show_video_saved)
         self.video_thread.finished.connect(self.on_video_thread_finished)
         self.video_thread.start()
+
+    def closeEvent(self, event):
+        if hasattr(self, 'video_popup'):
+            try:
+                self.video_popup.cleanup()
+                self.video_popup.close()
+            except:
+                pass
+        event.accept()
+
+
+    
 
     def cancel_video_processing(self):
         if hasattr(self, 'video_thread') and self.video_thread.isRunning():
@@ -1233,10 +1330,10 @@ class CSVFilterApp(QWidget):
 
 if __name__ == "__main__":
     os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/path/to/your/qt/plugins/platforms"  
+    os.environ["QT_MULTIMEDIA_PREFERRED_PLUGINS"] = "windowsmedia"
     app = QApplication(sys.argv)
     setup_dark_theme(app)
     app.setStyle("Fusion")
     window = CSVFilterApp()
     window.show()
     sys.exit(app.exec_())
-
