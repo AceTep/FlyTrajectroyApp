@@ -849,6 +849,15 @@ class CSVFilterApp(QWidget):
         }
         self.file_checkboxes = {}
 
+        self.video_checkbox = None
+        self.edgelist_checkbox = None
+        self.calibration_checkbox = None
+        self.file_paths = {
+            'video': None,
+            'edgelist': None,
+            'calibration': None
+        }
+
         # Progress dialog
         self.progress_dialog = QProgressDialog("Processing video...", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowTitle("Video Progress")
@@ -981,6 +990,8 @@ class CSVFilterApp(QWidget):
         layout.addWidget(buttons)
         dialog.setLayout(layout)
 
+
+
         if dialog.exec_():
             self.use_blank_background = chk_blank.isChecked()
             self.draw_boxes = chk_boxes.isChecked()
@@ -1019,48 +1030,66 @@ class CSVFilterApp(QWidget):
                 all_data = []
                 self.fly_colors.clear()
                 
-                for i in reversed(range(self.file_list_layout.count())): 
-                    self.file_list_layout.itemAt(i).widget().setParent(None)
-                self.file_checkboxes.clear()
+                # Clear only the CSV file checkboxes (preserve video, edgelist, calibration)
+                for fly_id in list(self.file_checkboxes.keys()):
+                    widget = self.file_checkboxes[fly_id]
+                    if widget:  # Check if widget exists before trying to remove it
+                        widget.setParent(None)
+                    del self.file_checkboxes[fly_id]
                 
-                for idx, file_path in enumerate(file_paths):
-                    df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
-                    fly_id = os.path.splitext(os.path.basename(file_path))[0]
-                    df["fly_id"] = fly_id
-                    all_data.append(df)
-                    self.fly_colors[fly_id] = generate_fly_color(fly_id)
-                    
-                    chk = QCheckBox(fly_id)
-                    chk.setChecked(True)
-                    chk.setStyleSheet(f"""
-                        QCheckBox {{
-                            color: {TEXT_COLOR};
-                            spacing: 8px;
-                        }}
-                        QCheckBox::indicator {{
-                            width: 16px;
-                            height: 16px;
-                        }}
-                    """)
-                    self.file_list_layout.addWidget(chk)
-                    self.file_checkboxes[fly_id] = chk
-                    
+                # Load each CSV file and create a checkbox for it
+                for file_path in file_paths:
+                    try:
+                        df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
+                        fly_id = os.path.splitext(os.path.basename(file_path))[0]
+                        df["fly_id"] = fly_id
+                        all_data.append(df)
+                        self.fly_colors[fly_id] = generate_fly_color(fly_id)
+                        
+                        # Create checkbox for this file
+                        chk = QCheckBox(fly_id)
+                        chk.setChecked(True)
+                        chk.setStyleSheet(f"""
+                            QCheckBox {{
+                                color: {TEXT_COLOR};
+                                spacing: 8px;
+                            }}
+                            QCheckBox::indicator {{
+                                width: 16px;
+                                height: 16px;
+                            }}
+                        """)
+                        self.file_list_layout.addWidget(chk)
+                        self.file_checkboxes[fly_id] = chk
+                        
+                    except Exception as e:
+                        print(f"Error loading file {file_path}: {str(e)}")
+                        continue
+                        
+                # Combine all loaded data into one dataframe
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
+                
+                # Enable video button if we have both flies and edgelist
                 if self.edgelist_path:
                     self.video_button.setEnabled(True)
                     
-                
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load CSVs:\n{str(e)}")
-                
+    
     def load_video(self):
         video_path, _ = QFileDialog.getOpenFileName(self, "Select Background Video", "", "Video Files (*.mp4 *.avi *.mov)")
         if video_path:
-            self.video_path = video_path
+            self.file_paths['video'] = video_path
             video_name = os.path.basename(video_path)
-            chk = QCheckBox(f"Video: {video_name}")
-            chk.setChecked(True)
-            chk.setStyleSheet(f"""
+            
+            # Remove old checkbox if exists
+            if self.video_checkbox:
+                self.video_checkbox.setParent(None)
+            
+            # Create new checkbox
+            self.video_checkbox = QCheckBox(f"Video: {video_name}")
+            self.video_checkbox.setChecked(True)
+            self.video_checkbox.setStyleSheet(f"""
                 QCheckBox {{
                     color: {TEXT_COLOR};
                     spacing: 8px;
@@ -1070,19 +1099,25 @@ class CSVFilterApp(QWidget):
                     height: 16px;
                 }}
             """)
-            self.file_list_layout.addWidget(chk)
+            self.file_list_layout.addWidget(self.video_checkbox)
             
-            if self.all_flies_df is not None and self.edgelist_path:
+            if self.all_flies_df is not None and self.file_paths['edgelist']:
                 self.video_button.setEnabled(True)
-                
+
     def load_edgelist(self):
         edgelist_path, _ = QFileDialog.getOpenFileName(self, "Select Edgelist CSV", "", "CSV Files (*.csv)")
         if edgelist_path:
-            self.edgelist_path = edgelist_path
+            self.file_paths['edgelist'] = edgelist_path
             edgelist_name = os.path.basename(edgelist_path)
-            chk = QCheckBox(f"Edgelist: {edgelist_name}")
-            chk.setChecked(True)
-            chk.setStyleSheet(f"""
+            
+            # Remove old checkbox if exists
+            if self.edgelist_checkbox:
+                self.edgelist_checkbox.setParent(None)
+            
+            # Create new checkbox
+            self.edgelist_checkbox = QCheckBox(f"Edgelist: {edgelist_name}")
+            self.edgelist_checkbox.setChecked(True)
+            self.edgelist_checkbox.setStyleSheet(f"""
                 QCheckBox {{
                     color: {TEXT_COLOR};
                     spacing: 8px;
@@ -1092,11 +1127,11 @@ class CSVFilterApp(QWidget):
                     height: 16px;
                 }}
             """)
-            self.file_list_layout.addWidget(chk)
+            self.file_list_layout.addWidget(self.edgelist_checkbox)
             
             if self.all_flies_df is not None:
                 self.video_button.setEnabled(True)
-                
+
     def load_calibration(self):
         path, _ = QFileDialog.getOpenFileName(self)
         if path:
@@ -1110,12 +1145,17 @@ class CSVFilterApp(QWidget):
                     'x_px_ratio': config['x_px_ratio'],
                     'y_px_ratio': config['y_px_ratio']
                 })
-                self.calibration_path = path
-                
+                self.file_paths['calibration'] = path
                 cal_name = os.path.basename(path)
-                chk = QCheckBox(f"Calibration: {cal_name}")
-                chk.setChecked(True)
-                chk.setStyleSheet(f"""
+                
+                # Remove old checkbox if exists
+                if self.calibration_checkbox:
+                    self.calibration_checkbox.setParent(None)
+                
+                # Create new checkbox
+                self.calibration_checkbox = QCheckBox(f"Calibration: {cal_name}")
+                self.calibration_checkbox.setChecked(True)
+                self.calibration_checkbox.setStyleSheet(f"""
                     QCheckBox {{
                         color: {TEXT_COLOR};
                         spacing: 8px;
@@ -1125,51 +1165,59 @@ class CSVFilterApp(QWidget):
                         height: 16px;
                     }}
                 """)
-                self.file_list_layout.addWidget(chk)
+                self.file_list_layout.addWidget(self.calibration_checkbox)
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load calibration:\n{str(e)}")
 
-    def closeEvent(self, event):
-        if hasattr(self, 'video_popup'):
-            try:
-                self.video_popup.cleanup()
-                self.video_popup.close()
-            except:
-                pass
-        event.accept()
     def generate_video(self):
-        if self.all_flies_df is None or not self.edgelist_path:
-            QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs and edgelist before generating the video.")
+        # Check if required files are loaded and checked
+        if self.all_flies_df is None:
+            QMessageBox.warning(self, "Missing Inputs", "Please load fly CSVs before generating the video.")
             return
-        checked_ids = [fly_id for fly_id, chk in self.file_checkboxes.items() if chk.isChecked()]
-        filtered_df = self.all_flies_df[self.all_flies_df['fly_id'].isin(checked_ids)]
         
-        if len(filtered_df) == 0:
+        # Check edgelist
+        if not self.file_paths['edgelist'] or (self.edgelist_checkbox and not self.edgelist_checkbox.isChecked()):
+            QMessageBox.warning(self, "Missing Edgelist", "Edgelist is required but not selected or unchecked.")
+            return
+        
+        # Get checked fly IDs
+        checked_ids = [fly_id for fly_id, chk in self.file_checkboxes.items() if chk.isChecked()]
+        if not checked_ids:
             QMessageBox.warning(self, "No Files Selected", "Please check at least one fly CSV to include in the video.")
             return
         
-        if not self.video_path:
-            use_blank = True
-            QMessageBox.information(self, "No Video", "No background video loaded. Using blank white background.")
+        # Filter dataframe
+        filtered_df = self.all_flies_df[self.all_flies_df['fly_id'].isin(checked_ids)].copy()
+        
+        # Determine video source
+        use_blank = True
+        video_path = None
+        
+        if self.file_paths['video'] and (not self.video_checkbox or self.video_checkbox.isChecked()):
+            use_blank = False
+            video_path = self.file_paths['video']
         else:
-            use_blank = self.use_blank_background
-
-        final_draw_boxes = True
-        final_draw_arrows = self.draw_arrows
-        final_draw_boxes = self.draw_boxes
-        min_duration = getattr(self, 'min_edge_duration', 0)
-        color_edges = getattr(self, 'color_code_edges', False)
-
-
+            QMessageBox.information(self, "No Video", "No background video selected or unchecked. Using blank white background.")
+        
+        # Determine calibration
+        calibration_values = None
+        if self.file_paths['calibration'] and (not self.calibration_checkbox or self.calibration_checkbox.isChecked()):
+            calibration_values = self.calibration_values
+        
+        # Start video generation
         self.progress_dialog.setValue(0)
         self.progress_dialog.show()
+        
         self.video_thread = VideoProcessingThread(
-            self.all_flies_df, self.video_path, self.edgelist_path, self.fly_colors,
+            filtered_df,
+            video_path,
+            self.file_paths['edgelist'],
+            self.fly_colors,
             use_blank=use_blank,
-            draw_boxes=final_draw_boxes,
+            draw_boxes=self.draw_boxes,
             draw_labels=self.show_labels,
-            draw_arrows=final_draw_arrows,
+            draw_arrows=self.draw_arrows,
             show_frame_counter=self.show_frame_counter,
             scale_factor=self.scale_factor,
             edge_persistence_seconds=self.edge_persistence_seconds,
@@ -1179,15 +1227,27 @@ class CSVFilterApp(QWidget):
             end_time_min=self.end_time_min,
             fly_size=13,
             draw_petri_circle=self.draw_petri_circle,
-            min_edge_duration=min_duration,
-            color_code_edges=color_edges,
-            calibration_values=self.calibration_values) 
+            min_edge_duration=getattr(self, 'min_edge_duration', 0),
+            color_code_edges=getattr(self, 'color_code_edges', False),
+            calibration_values=calibration_values)
 
         self.video_thread.update_progress.connect(self.show_progress)
         self.video_thread.update_progress_bar.connect(self.progress_dialog.setValue)
         self.video_thread.video_saved.connect(self.show_video_saved)
         self.video_thread.finished.connect(self.on_video_thread_finished)
         self.video_thread.start()
+
+    def closeEvent(self, event):
+        if hasattr(self, 'video_popup'):
+            try:
+                self.video_popup.cleanup()
+                self.video_popup.close()
+            except:
+                pass
+        event.accept()
+
+
+    
 
     def cancel_video_processing(self):
         if hasattr(self, 'video_thread') and self.video_thread.isRunning():
