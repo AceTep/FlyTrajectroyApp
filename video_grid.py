@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QTextEdit, QMessageBox, QProgressDialog,
     QHBoxLayout, QStyle, QSlider, QLabel, QDialog,
     QCheckBox, QDialogButtonBox, QTabWidget, QComboBox, 
-    QLineEdit, QFormLayout, QFrame, QScrollArea,QSizePolicy
+    QLineEdit, QFormLayout, QFrame, QScrollArea,QSizePolicy,QGridLayout
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
@@ -498,7 +498,7 @@ class VideoProcessingThread(QThread):
 
                 
 class VideoPlayerWindow(QWidget):
-    def __init__(self, video_path):
+    def __init__(self, video_path,fly_positions):
         super().__init__()
         self.setWindowTitle("Video Player")
         self.resize(800, 600)
@@ -515,6 +515,8 @@ class VideoPlayerWindow(QWidget):
 
         self.frame_idx = 0
         self.paused = True
+
+        self.fly_positions = fly_positions
 
         # UI
         layout = QVBoxLayout(self)
@@ -559,6 +561,11 @@ class VideoPlayerWindow(QWidget):
         self.fullscreen_button = create_button("Fullscreen")
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
 
+        self.fly_grid_button = create_button("Show Fly Grid")
+        self.fly_grid_button.clicked.connect(self.show_fly_grid)
+        control_layout.addWidget(self.fly_grid_button)
+
+
         self.skip_back_button = create_button("<< 5s")
         self.skip_back_button.clicked.connect(self.skip_back)
 
@@ -601,34 +608,69 @@ class VideoPlayerWindow(QWidget):
         if not self.timer.isActive():
             self.timer.start(int(1000 / self.fps))
         self.paused = False
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.start()
 
     def pause(self):
         self.timer.stop()
         self.paused = True
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.pause()
 
     def stop(self):
         self.pause()
         self.frame_idx = 0
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
         self.next_frame()
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.stop()
+
 
     def skip_back(self):
         target = max(0, self.frame_idx - int(5 * self.fps))
         self.frame_idx = target
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
         self.next_frame()
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.set_frame_index(self.frame_idx)
 
     def skip_forward(self):
         target = min(self.total_frames - 1, self.frame_idx + int(5 * self.fps))
         self.frame_idx = target
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
         self.next_frame()
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.set_frame_index(self.frame_idx)
+
 
     def seek_video(self):
         ms = self.slider.value()
         self.frame_idx = int((ms / 1000) * self.fps)
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
         self.next_frame()
+
+        # ✅ NEW: keep the grid view in sync
+        if hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window.set_frame_index(self.frame_idx)
+
+
+    def show_fly_grid(self):
+        if not hasattr(self, 'fly_grid_window'):
+            self.fly_grid_window = FlyGridWindow(self.cap, self.fly_positions, self.frame_idx, self.fps)
+
+        # Always update frame index to match
+        self.fly_grid_window.set_frame_index(self.frame_idx)
+
+        # If video is playing, start the grid too
+        if not self.paused:
+            self.fly_grid_window.start()
+        else:
+            self.fly_grid_window.pause()
+
+        self.fly_grid_window.show()
+
+
+
 
     def next_frame(self):
         ret, frame = self.cap.read()
@@ -675,6 +717,73 @@ class VideoPlayerWindow(QWidget):
                 ))
         super().resizeEvent(event)
 
+
+class FlyGridWindow(QWidget):
+    def __init__(self, cap, fly_positions, frame_idx, fps):
+        super().__init__()
+        self.setWindowTitle("Fly Grid View")
+        self.cap = cap
+        self.fly_positions = fly_positions
+        self.frame_idx = frame_idx
+        self.fps = fps
+        self.setStyleSheet(f"background-color: {DARK_GRAY};")
+        self.layout = QGridLayout(self)
+        self.labels = {}
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_grid)
+        self.is_playing = False  # <- Control state
+
+        for idx, fly_id in enumerate(sorted(self.fly_positions.keys())):
+            label = QLabel()
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("background-color: black;")
+            self.layout.addWidget(label, idx // 4, idx % 4)
+            self.labels[fly_id] = label
+
+    def start(self):
+        if not self.is_playing:
+            self.timer.start(int(1000 / self.fps))
+            self.is_playing = True
+
+    def pause(self):
+        if self.is_playing:
+            self.timer.stop()
+            self.is_playing = False
+
+    def stop(self):
+        self.pause()
+        self.frame_idx = 0
+        self.update_grid()
+
+    def set_frame_index(self, frame_idx):
+        self.frame_idx = frame_idx
+        self.update_grid()
+
+    def update_grid(self):
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+        for fly_id, label in self.labels.items():
+            if fly_id not in self.fly_positions or self.frame_idx >= len(self.fly_positions[fly_id]):
+                continue
+            x, y, _ = self.fly_positions[fly_id][self.frame_idx]
+            x, y = int(x), int(y)
+            crop_size = 100
+
+            x1 = max(0, x - crop_size)
+            y1 = max(0, y - crop_size)
+            x2 = min(frame.shape[1], x + crop_size)
+            y2 = min(frame.shape[0], y + crop_size)
+
+            fly_crop = frame[y1:y2, x1:x2]
+            fly_crop = cv2.resize(fly_crop, (160, 160))
+            rgb = cv2.cvtColor(fly_crop, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            label.setPixmap(QPixmap.fromImage(qimg))
+
+        self.frame_idx += 1
 
 
 class CSVFilterApp(QWidget):
@@ -1321,12 +1430,22 @@ class CSVFilterApp(QWidget):
                 if hasattr(self, 'video_popup'):
                     del self.video_popup
 
-        # Create new window
+        # 🧠 STEP 1: Get video resolution
+        cap = cv2.VideoCapture(self.generated_video_path)
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        # 🧠 STEP 2: Get fly positions (reuse logic from VideoProcessingThread)
+        fly_positions, _ = self.video_thread.transform_fly_positions(frame_width, frame_height)
+
+        # 🧠 STEP 3: Open video player and pass fly positions
         try:
-            self.video_popup = VideoPlayerWindow(self.generated_video_path)
+            self.video_popup = VideoPlayerWindow(self.generated_video_path, fly_positions)
             self.video_popup.show()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open video player: {str(e)}")
+
 
 
 if __name__ == "__main__":
