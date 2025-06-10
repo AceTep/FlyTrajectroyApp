@@ -71,7 +71,7 @@ def generate_fly_colors(fly_ids):
         colors[fly_id] = palette[i % n]  # Wrap around if > 24 flies
 
     return colors
-
+    
 def setup_dark_theme(app):
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(DARK_GRAY))
@@ -382,6 +382,14 @@ class VideoProcessingThread(QThread):
                 return
 
             elapsed = time.time() - start_time
+            np.savez(
+                f"{os.path.splitext(output_filename)[0]}_data.npz",
+                fly_positions=transformed_positions,
+                calibration=self.calibration_values
+            )
+
+            elapsed = time.time() - start_time
+
             self.video_saved.emit(output_filename, elapsed)
 
         except Exception as e:
@@ -1016,6 +1024,11 @@ class CSVFilterApp(QWidget):
         self.play_button.setEnabled(False)
         self.play_button.clicked.connect(self.play_embedded_video)
         left_layout.addWidget(self.play_button)
+
+        self.play_loaded_video_button = create_button("Play Loaded Video")
+        self.play_loaded_video_button.clicked.connect(self.play_loaded_video_with_prompt)
+        left_layout.addWidget(self.play_loaded_video_button)
+
         
         left_layout.addStretch()
         content_layout.addWidget(left_panel)
@@ -1528,6 +1541,94 @@ class CSVFilterApp(QWidget):
             self.video_popup.show()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open video player: {str(e)}")
+
+    def play_loaded_video_with_prompt(self):
+        video_path, _ = QFileDialog.getOpenFileName(self, "Select Generated Video", "", "Video Files (*.mp4 *.avi *.mov)")
+        if not video_path:
+            return
+
+        use_grid = QMessageBox.question(
+            self,
+            "Enable Grid View",
+            "Do you want to enable Fly Grid View?",
+            QMessageBox.Yes | QMessageBox.No
+        ) == QMessageBox.Yes
+
+        # Try to auto-load .npz file
+        npz_path = f"{os.path.splitext(video_path)[0]}_data.npz"
+        if use_grid and os.path.exists(npz_path):
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+                transformed_positions = data['fly_positions'].item()
+                calibration = data['calibration'].item()
+                self.video_popup = VideoPlayerWindow(video_path, transformed_positions)
+                self.video_popup.show()
+                return
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to load fly data from {npz_path}:\n{str(e)}")
+
+        # Manual load if no .npz
+        if use_grid:
+            # Load fly CSVs
+            file_paths, _ = QFileDialog.getOpenFileNames(self, "Load Fly CSVs", "", "CSV Files (*.csv)")
+            if not file_paths:
+                QMessageBox.warning(self, "Missing Data", "No CSVs loaded. Grid View requires fly positions.")
+                return
+
+            all_data = []
+            fly_ids = []
+            for path in file_paths:
+                df = pd.read_csv(path, usecols=["pos x", "pos y", "ori"])
+                fly_id = os.path.splitext(os.path.basename(path))[0]
+                df["fly_id"] = fly_id
+                all_data.append(df)
+                fly_ids.append(fly_id)
+
+            all_flies_df = pd.concat(all_data, ignore_index=True)
+            fly_colors = generate_fly_colors(fly_ids)
+
+            # Load calibration file
+            cal_path, _ = QFileDialog.getOpenFileName(self, "Load Calibration (.toml)", "", "TOML Files (*.toml)")
+            if not cal_path:
+                QMessageBox.warning(self, "Missing Calibration", "Calibration file is required for accurate fly grid view.")
+                return
+            try:
+                with open(cal_path, "rb") as f:
+                    config = tomllib.load(f)
+                calibration_values = {
+                    'min_x': config['min_x'],
+                    'min_y': config['min_y'],
+                    'x_px_ratio': config['x_px_ratio'],
+                    'y_px_ratio': config['y_px_ratio']
+                }
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to read calibration file:\n{str(e)}")
+                return
+
+            # Get frame size for fly transformation
+            cap = cv2.VideoCapture(video_path)
+            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+
+            # Reuse transformation logic from VideoProcessingThread
+            transformed_positions, _ = VideoProcessingThread(
+                all_flies_df, video_path, fly_colors=fly_colors, calibration_values=calibration_values
+            ).transform_fly_positions(frame_width, frame_height)
+
+            self.video_popup = VideoPlayerWindow(video_path, transformed_positions)
+            self.video_popup.show()
+        else:
+            # No grid view; simple playback
+            try:
+                cap = cv2.VideoCapture(video_path)
+                frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+                self.video_popup = VideoPlayerWindow(video_path, {})
+                self.video_popup.show()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to open video:\n{str(e)}")
 
 
 
