@@ -22,6 +22,7 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtGui import QFont, QPalette, QColor,QPixmap, QImage, QIcon
 import hashlib
+import colorsys
 
 DARK_GRAY = "#2D2D2D"
 MEDIUM_GRAY = "#3E3E3E"
@@ -30,12 +31,46 @@ ACCENT_COLOR = "#5D9B9B"
 WHITE = "#FFFFFF"
 TEXT_COLOR = "#E0E0E0"
 
-def generate_fly_color(fly_id):
-    digest = hashlib.md5(fly_id.encode()).hexdigest()
-    r = int(digest[0:2], 16)
-    g = int(digest[2:4], 16)
-    b = int(digest[4:6], 16)
-    return (r, g, b)
+HARDCODED_FLY_COLORS = [
+    (255, 0, 0),      # Red
+    (0, 255, 0),      # Green
+    (0, 0, 255),      # Blue
+    (255, 165, 0),    # Orange
+    (128, 0, 128),    # Purple
+    (0, 255, 255),    # Cyan
+    (255, 255, 0),    # Yellow
+    (255, 0, 255),    # Magenta
+    (128, 128, 0),    # Olive
+    (0, 128, 128),    # Teal
+    (128, 0, 0),      # Maroon
+    (0, 0, 128),      # Navy
+    (210, 105, 30),   # Chocolate
+    (139, 69, 19),    # Saddle Brown
+    (70, 130, 180),   # Steel Blue
+    (255, 20, 147),   # Deep Pink
+    (0, 191, 255),    # Deep Sky Blue
+    (152, 251, 152),  # Pale Green
+    (186, 85, 211),   # Medium Orchid
+    (255, 215, 0),    # Gold
+    (105, 105, 105),  # Dim Gray
+    (199, 21, 133),   # Medium Violet Red
+    (173, 255, 47),   # Green Yellow
+    (0, 100, 0),      # Dark Green
+]
+
+
+def generate_fly_colors(fly_ids):
+    """
+    Assign distinct colors to each fly using a fixed, human-friendly palette.
+    """
+    colors = {}
+    palette = HARDCODED_FLY_COLORS
+    n = len(palette)
+
+    for i, fly_id in enumerate(sorted(fly_ids)):
+        colors[fly_id] = palette[i % n]  # Wrap around if > 24 flies
+
+    return colors
 
 def setup_dark_theme(app):
     palette = QPalette()
@@ -1239,21 +1274,25 @@ class CSVFilterApp(QWidget):
             try:
                 all_data = []
                 self.fly_colors.clear()
-                
+
+                # Clear old checkboxes
                 for fly_id in list(self.file_checkboxes.keys()):
                     widget = self.file_checkboxes[fly_id]
-                    if widget:  
+                    if widget:
                         widget.setParent(None)
                     del self.file_checkboxes[fly_id]
-                
+
+                fly_ids = []
+
                 for file_path in file_paths:
                     try:
                         df = pd.read_csv(file_path, usecols=["pos x", "pos y", "ori"])
                         fly_id = os.path.splitext(os.path.basename(file_path))[0]
                         df["fly_id"] = fly_id
                         all_data.append(df)
-                        self.fly_colors[fly_id] = generate_fly_color(fly_id)
-                        
+                        fly_ids.append(fly_id)
+
+                        # Create checkbox
                         chk = QCheckBox(fly_id)
                         chk.setChecked(True)
                         chk.setStyleSheet(f"""
@@ -1268,16 +1307,20 @@ class CSVFilterApp(QWidget):
                         """)
                         self.file_list_layout.addWidget(chk)
                         self.file_checkboxes[fly_id] = chk
-                        
+
                     except Exception as e:
                         print(f"Error loading file {file_path}: {str(e)}")
                         continue
-                        
+
+                # Assign distinct fly colors
+                self.fly_colors = generate_fly_colors(fly_ids)
+
+                # Combine all data
                 self.all_flies_df = pd.concat(all_data, ignore_index=True)
-                
+
                 if self.edgelist_path:
                     self.video_button.setEnabled(True)
-                    
+
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load CSVs:\n{str(e)}")
     
