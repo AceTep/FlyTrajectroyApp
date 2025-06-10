@@ -3,6 +3,7 @@ import pandas as pd
 import cv2
 import numpy as np
 import time
+import math
 import csv
 import os
 import traceback
@@ -661,7 +662,14 @@ class VideoPlayerWindow(QWidget):
     def show_fly_grid(self):
         if not hasattr(self, 'fly_grid_window'):
             self.fly_grid_window = FlyGridWindow(self.fly_positions, self.frame_idx)
-        self.fly_grid_window.update_from_frame(self.current_frame, self.frame_idx)
+
+        if hasattr(self, 'current_frame'):
+            self.fly_grid_window.update_from_frame(self.current_frame, self.frame_idx)
+        else:
+            # Show blank white background if video hasn't started
+            blank = np.ones((480, 640, 3), dtype=np.uint8) * 255
+            self.fly_grid_window.update_from_frame(blank, self.frame_idx)
+
         self.fly_grid_window.show()
 
 
@@ -757,7 +765,7 @@ class FlyGridWindow(QWidget):
         self.worker = FlyGridWorker(fly_positions)
         self.worker.updated.connect(self.update_grid)
         self.labels = {}
-        self.active = True  # Controls pause/resume
+        self.active = True
         self.current_frame_idx = frame_idx
 
         self.setStyleSheet(f"""
@@ -775,6 +783,16 @@ class FlyGridWindow(QWidget):
             key=lambda x: int(x[3:]) if x.lower().startswith('fly') and x[3:].isdigit() else x
         )
 
+        num_flies = len(sorted_fly_ids)
+        if num_flies == 12:
+            rows, cols = 3, 4
+        elif num_flies == 24:
+            rows, cols = 4, 6
+        else:
+            cols = 4
+            rows = math.ceil(num_flies / cols)
+
+
         for idx, fly_id in enumerate(sorted_fly_ids):
             container = QWidget()
             container_layout = QVBoxLayout(container)
@@ -791,7 +809,9 @@ class FlyGridWindow(QWidget):
             video_label.setStyleSheet("background-color: black;")
             container_layout.addWidget(video_label)
 
-            self.layout.addWidget(container, idx // 4, idx % 4)
+            row = idx // cols
+            col = idx % cols
+            self.layout.addWidget(container, row, col)
             self.labels[fly_id] = video_label
 
     def update_from_frame(self, frame, frame_idx):
@@ -1437,7 +1457,6 @@ class CSVFilterApp(QWidget):
 
         if hasattr(self, 'video_popup'):
             try:
-                self.video_popup.cleanup()
                 self.video_popup.close()
                 self.video_popup.deleteLater()
             except Exception as e:
