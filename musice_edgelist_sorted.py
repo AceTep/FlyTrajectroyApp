@@ -661,16 +661,17 @@ class VideoPlayerWindow(QWidget):
 
     def show_fly_grid(self):
         if not hasattr(self, 'fly_grid_window'):
-            self.fly_grid_window = FlyGridWindow(self.fly_positions, self.frame_idx)
+            zoom = getattr(self.parent(), 'use_small_grid_zoom', False)  # Fetch from main app
+            self.fly_grid_window = FlyGridWindow(self.fly_positions, self.frame_idx, small_zoom=zoom)
 
         if hasattr(self, 'current_frame'):
             self.fly_grid_window.update_from_frame(self.current_frame, self.frame_idx)
         else:
-            # Show blank white background if video hasn't started
             blank = np.ones((480, 640, 3), dtype=np.uint8) * 255
             self.fly_grid_window.update_from_frame(blank, self.frame_idx)
 
         self.fly_grid_window.show()
+
 
 
     def hide_fly_grid(self):
@@ -736,9 +737,10 @@ class VideoPlayerWindow(QWidget):
 class FlyGridWorker(QObject):
     updated = pyqtSignal(dict)
 
-    def __init__(self, fly_positions):
+    def __init__(self, fly_positions,crop_size=160):
         super().__init__()
         self.fly_positions = fly_positions
+        self.crop_size = crop_size  
 
     def update_from_frame(self, frame, frame_idx):
         crops = {}
@@ -753,16 +755,17 @@ class FlyGridWorker(QObject):
                 y2 = min(frame.shape[0], y + crop_size)
                 fly_crop = frame[y1:y2, x1:x2]
                 if fly_crop.size != 0:
-                    fly_crop = cv2.resize(fly_crop, (160, 160))
+                    fly_crop = cv2.resize(fly_crop, (self.crop_size, self.crop_size))
                     crops[fly_id] = fly_crop
 
         self.updated.emit(crops)
 class FlyGridWindow(QWidget):
-    def __init__(self, fly_positions, frame_idx):
+    def __init__(self, fly_positions, frame_idx, small_zoom=False):
         super().__init__()
         self.setWindowTitle("Fly Grid View")
         self.fly_positions = fly_positions
-        self.worker = FlyGridWorker(fly_positions)
+        self.crop_size = 80 if small_zoom else 160
+        self.worker = FlyGridWorker(fly_positions, crop_size=self.crop_size)
         self.worker.updated.connect(self.update_grid)
         self.labels = {}
         self.active = True
@@ -1101,9 +1104,13 @@ class CSVFilterApp(QWidget):
 
         chk_draw_circle = QCheckBox("Draw petri dish circle")
         chk_draw_circle.setChecked(self.draw_petri_circle)
+
+        chk_small_grid_zoom = QCheckBox("Use smaller zoom in Fly Grid (80x80)")
+        chk_small_grid_zoom.setChecked(getattr(self, 'use_small_grid_zoom', False)) 
+        visuals_layout.addWidget(chk_small_grid_zoom)
         visuals_layout.addWidget(chk_draw_circle)
 
-        for chk in [chk_blank, chk_boxes, chk_labels, chk_arrows, chk_frame_counter]:
+        for chk in [chk_blank, chk_boxes, chk_labels, chk_arrows, chk_frame_counter,chk_small_grid_zoom,chk_draw_circle]:
             visuals_layout.addWidget(chk)
 
         visuals_tab.setLayout(visuals_layout)
@@ -1207,6 +1214,7 @@ class CSVFilterApp(QWidget):
             self.enable_screenshot_saving = self.save_screenshot_checkbox.isChecked()
             self.screenshot_interval_min = self.screenshot_interval_slider.value()
             self.draw_petri_circle = chk_draw_circle.isChecked()
+            self.use_small_grid_zoom = chk_small_grid_zoom.isChecked()
 
             try:
                 self.min_edge_duration = int(self.min_duration_input.text())
