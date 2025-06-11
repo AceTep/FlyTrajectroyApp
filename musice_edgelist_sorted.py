@@ -56,6 +56,30 @@ HARDCODED_FLY_COLORS = [
     (199, 21, 133),   # Medium Violet Red
     (173, 255, 47),   # Green Yellow
     (0, 100, 0),      # Dark Green
+    (255, 99, 71),     # Tomato
+    (30, 144, 255),    # Dodger Blue
+    (218, 112, 214),   # Orchid
+    (46, 139, 87),     # Sea Green
+    (240, 230, 140),   # Khaki
+    (220, 20, 60),     # Crimson
+    (72, 61, 139),     # Dark Slate Blue
+    (255, 105, 180),   # Hot Pink
+    (0, 206, 209),     # Dark Turquoise
+    (148, 0, 211),     # Dark Violet
+    (233, 150, 122),   # Dark Salmon
+    (143, 188, 143),   # Dark Sea Green
+    (147, 112, 219),   # Medium Purple
+    (60, 179, 113),    # Medium Sea Green
+    (250, 128, 114),   # Salmon
+    (123, 104, 238),   # Medium Slate Blue
+    (255, 140, 0),     # Dark Orange
+    (154, 205, 50),    # Yellow Green
+    (139, 0, 139),     # Dark Magenta
+    (32, 178, 170),    # Light Sea Green
+    (216, 191, 216),   # Thistle
+    (255, 127, 80),    # Coral
+    (100, 149, 237),   # Cornflower Blue
+    (219, 112, 147),   # Pale Violet Red
 ]
 
 
@@ -807,7 +831,7 @@ class FlyGridWindow(QWidget):
         super().__init__()
         self.setWindowTitle("Fly Grid View")
         self.fly_positions = fly_positions
-        self.crop_size = 80 if small_zoom else 160
+        self.crop_size = 50 if small_zoom else 160
         self.worker = FlyGridWorker(fly_positions, crop_size=self.crop_size)
         self.worker.updated.connect(self.update_grid)
         self.labels = {}
@@ -1153,7 +1177,7 @@ class CSVFilterApp(QWidget):
         chk_draw_circle = QCheckBox("Draw petri dish circle")
         chk_draw_circle.setChecked(self.draw_petri_circle)
 
-        chk_small_grid_zoom = QCheckBox("Use smaller zoom in Fly Grid (80x80)")
+        chk_small_grid_zoom = QCheckBox("Use smaller zoom in Fly Grid (50x50)")
         chk_small_grid_zoom.setChecked(getattr(self, 'use_small_grid_zoom', False)) 
         visuals_layout.addWidget(chk_small_grid_zoom)
         visuals_layout.addWidget(chk_draw_circle)
