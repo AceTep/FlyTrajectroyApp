@@ -3,21 +3,21 @@ import math
 
 from PyQt5.QtCore import pyqtSignal, Qt, QObject
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel,QGridLayout
+    QWidget, QVBoxLayout, QLabel, QGridLayout
 )
 from PyQt5.QtGui import QPixmap, QImage
-from utils.theme import (
-    DARK_GRAY
-)
+from utils.theme import DARK_GRAY
 
+# Worker class to extract cropped fly images from frames
 class FlyGridWorker(QObject):
-    updated = pyqtSignal(dict)
+    updated = pyqtSignal(dict)  # Signal to send updated crops
 
-    def __init__(self, fly_positions,crop_size=160):
+    def __init__(self, fly_positions, crop_size=160):
         super().__init__()
         self.fly_positions = fly_positions
-        self.crop_size = crop_size  
+        self.crop_size = crop_size
 
+    # Update crops for current frame
     def update_from_frame(self, frame, frame_idx):
         crops = {}
         for fly_id, positions in self.fly_positions.items():
@@ -34,7 +34,9 @@ class FlyGridWorker(QObject):
                     fly_crop = cv2.resize(fly_crop, (self.crop_size, self.crop_size))
                     crops[fly_id] = fly_crop
 
-        self.updated.emit(crops)
+        self.updated.emit(crops)  # Emit crops to update UI
+
+# Window to show cropped fly views in a grid
 class FlyGridWindow(QWidget):
     def __init__(self, fly_positions, frame_idx, small_zoom=False):
         super().__init__()
@@ -47,6 +49,7 @@ class FlyGridWindow(QWidget):
         self.active = True
         self.current_frame_idx = frame_idx
 
+        # Set background and label styles
         self.setStyleSheet(f"""
             background-color: {DARK_GRAY};
             QLabel {{
@@ -57,11 +60,13 @@ class FlyGridWindow(QWidget):
         self.layout = QGridLayout(self)
         self.layout.setSpacing(10)
 
+        # Sort fly IDs numerically if named like 'fly1', 'fly2', etc.
         sorted_fly_ids = sorted(
             fly_positions.keys(),
             key=lambda x: int(x[3:]) if x.lower().startswith('fly') and x[3:].isdigit() else x
         )
 
+        # Determine grid layout based on fly count
         num_flies = len(sorted_fly_ids)
         if num_flies == 12:
             rows, cols = 3, 4
@@ -71,7 +76,7 @@ class FlyGridWindow(QWidget):
             cols = 4
             rows = math.ceil(num_flies / cols)
 
-
+        # Create grid layout with label and image for each fly
         for idx, fly_id in enumerate(sorted_fly_ids):
             container = QWidget()
             container_layout = QVBoxLayout(container)
@@ -93,11 +98,13 @@ class FlyGridWindow(QWidget):
             self.layout.addWidget(container, row, col)
             self.labels[fly_id] = video_label
 
+    # Update frame index and fetch new crops if active
     def update_from_frame(self, frame, frame_idx):
         self.current_frame_idx = frame_idx
         if self.active:
             self.worker.update_from_frame(frame, frame_idx)
 
+    # Display new crops in the UI
     def update_grid(self, crops):
         for fly_id, crop in crops.items():
             if fly_id in self.labels:
@@ -106,19 +113,20 @@ class FlyGridWindow(QWidget):
                 qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
                 self.labels[fly_id].setPixmap(QPixmap.fromImage(qimg))
 
+    # Pause crop updates
     def pause(self):
         self.active = False
 
+    # Resume crop updates
     def start(self):
         self.active = True
 
+    # Stop and clear all crop displays
     def stop(self):
         self.active = False
         for label in self.labels.values():
             label.clear()
 
+    # Set the current frame index manually
     def set_frame_index(self, frame_idx):
         self.current_frame_idx = frame_idx
-
-
-

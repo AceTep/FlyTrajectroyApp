@@ -1,3 +1,4 @@
+# Predefined list of distinct, human-friendly RGB colors
 HARDCODED_FLY_COLORS = [
     (255, 0, 0),      # Red
     (0, 255, 0),      # Green
@@ -23,41 +24,42 @@ HARDCODED_FLY_COLORS = [
     (199, 21, 133),   # Medium Violet Red
     (173, 255, 47),   # Green Yellow
     (0, 100, 0),      # Dark Green
-    (255, 99, 71),     # Tomato
-    (30, 144, 255),    # Dodger Blue
-    (218, 112, 214),   # Orchid
-    (46, 139, 87),     # Sea Green
-    (240, 230, 140),   # Khaki
-    (220, 20, 60),     # Crimson
-    (72, 61, 139),     # Dark Slate Blue
-    (255, 105, 180),   # Hot Pink
-    (0, 206, 209),     # Dark Turquoise
-    (148, 0, 211),     # Dark Violet
-    (233, 150, 122),   # Dark Salmon
-    (143, 188, 143),   # Dark Sea Green
-    (147, 112, 219),   # Medium Purple
-    (60, 179, 113),    # Medium Sea Green
-    (250, 128, 114),   # Salmon
-    (123, 104, 238),   # Medium Slate Blue
-    (255, 140, 0),     # Dark Orange
-    (154, 205, 50),    # Yellow Green
-    (139, 0, 139),     # Dark Magenta
-    (32, 178, 170),    # Light Sea Green
-    (216, 191, 216),   # Thistle
-    (255, 127, 80),    # Coral
-    (100, 149, 237),   # Cornflower Blue
-    (219, 112, 147),   # Pale Violet Red
+    (255, 99, 71),    # Tomato
+    (30, 144, 255),   # Dodger Blue
+    (218, 112, 214),  # Orchid
+    (46, 139, 87),    # Sea Green
+    (240, 230, 140),  # Khaki
+    (220, 20, 60),    # Crimson
+    (72, 61, 139),    # Dark Slate Blue
+    (255, 105, 180),  # Hot Pink
+    (0, 206, 209),    # Dark Turquoise
+    (148, 0, 211),    # Dark Violet
+    (233, 150, 122),  # Dark Salmon
+    (143, 188, 143),  # Dark Sea Green
+    (147, 112, 219),  # Medium Purple
+    (60, 179, 113),   # Medium Sea Green
+    (250, 128, 114),  # Salmon
+    (123, 104, 238),  # Medium Slate Blue
+    (255, 140, 0),    # Dark Orange
+    (154, 205, 50),   # Yellow Green
+    (139, 0, 139),    # Dark Magenta
+    (32, 178, 170),   # Light Sea Green
+    (216, 191, 216),  # Thistle
+    (255, 127, 80),   # Coral
+    (100, 149, 237),  # Cornflower Blue
+    (219, 112, 147),  # Pale Violet Red
 ]
 
 def generate_fly_colors(fly_ids):
     """
     Assign distinct colors to each fly using a fixed, human-friendly palette.
     """
-    colors = {}
-    palette = HARDCODED_FLY_COLORS
-    n = len(palette)
+    colors = {}                      # Dictionary to hold fly_id -> color
+    palette = HARDCODED_FLY_COLORS   # Use the predefined color palette
+    n = len(palette)                 # Total number of available colors
 
+    # Assign a color to each fly, wrap around if there are more flies than colors
     for i, fly_id in enumerate(sorted(fly_ids)):
-        colors[fly_id] = palette[i % n]  # Wrap around if > 24 flies
+        colors[fly_id] = palette[i % n]
 
-    return colors
+    return colors  # Return the mapping of fly IDs to colors

@@ -1,5 +1,6 @@
 from PyQt5.QtGui import QColor, QPalette
 
+# Define the color scheme using hex values
 DARK_GRAY = "#2D2D2D"
 MEDIUM_GRAY = "#3E3E3E"
 LIGHT_GRAY = "#4F4F4F"
@@ -9,6 +10,9 @@ TEXT_COLOR = "#E0E0E0"
 
 
 def setup_dark_theme(app):
+    """
+    Apply a custom dark theme to the given QApplication instance.
+    """
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(DARK_GRAY))
     palette.setColor(QPalette.WindowText, QColor(TEXT_COLOR))

@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import QPushButton, QLabel
 from utils.theme import ACCENT_COLOR, LIGHT_GRAY, DARK_GRAY, MEDIUM_GRAY, TEXT_COLOR
 
-
+# Create a styled QPushButton with consistent theme
 def create_button(text, parent=None):
     button = QPushButton(text, parent)
     button.setStyleSheet(f"""
@@ -23,6 +23,7 @@ def create_button(text, parent=None):
     """)
     return button
 
+# Create a styled QLabel to be used as a section title
 def create_section_title(text):
     label = QLabel(text)
     label.setStyleSheet(f"""
