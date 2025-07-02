@@ -695,7 +695,7 @@ class CSVFilterApp(QWidget):
             graph_interval_min=self.screenshot_interval_min,
             start_time_min=self.start_time_min,
             end_time_min=self.end_time_min,
-            fly_size=13,
+            fly_size=int(13 * self.scale_factor),
             draw_petri_circle=self.draw_petri_circle,
             min_edge_duration=getattr(self, 'min_edge_duration', 0),
             color_code_edges=getattr(self, 'color_code_edges', False),

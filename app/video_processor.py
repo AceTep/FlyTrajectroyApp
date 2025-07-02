@@ -44,6 +44,15 @@ class VideoProcessingThread(QThread):
         self.min_edge_duration = min_edge_duration
         self.color_code_edges = color_code_edges
         self.calibration_values = calibration_values
+        self.font_scale = max(0.4, 0.6 * scale_factor)
+        self.font_thickness = max(1, int(1 * scale_factor))
+        self.edge_thickness = max(1, int(2 * scale_factor))
+        self.box_thickness = max(1, int(2 * scale_factor))
+        self.label_offset = int(10 * scale_factor)
+        self.arrow_tip_length = int(20 * scale_factor)
+        self.arrow_line_thickness = max(1, int(4 * scale_factor))
+        self.bounding_box_margin = int(60 * scale_factor)
+            
 
     def cancel(self):
         """Flag thread to stop early if cancelled by user."""
@@ -131,7 +140,7 @@ class VideoProcessingThread(QThread):
                     x2, y2, _ = transformed_positions[fly2][frame_idx]
                     duration = end - start
                     self.draw_static_tip_arrow(frame, (int(x1), int(y1)), (int(x2), int(y2)),
-                                            (0, 0, 0), thickness=4, tip_length=20, duration=duration)
+                                            (0, 0, 0), thickness=self.arrow_line_thickness, tip_length=self.arrow_tip_length, duration=duration)
 
 
     def transform_fly_positions(self, frame_width, frame_height):
@@ -335,7 +344,8 @@ class VideoProcessingThread(QThread):
         color = (0, 0, 0) if self.use_blank else (255, 255, 255)
         thickness = 2
         # Draw text on frame
-        cv2.putText(frame, text, position, font, font_scale, color, thickness, cv2.LINE_AA)
+        cv2.putText(frame, text, position, font, self.font_scale, color, self.font_thickness, cv2.LINE_AA)
+
 
     def draw_offset_edge(self, frame, pos1, pos2, color, thickness=2, offset=50):
         # Convert points to NumPy arrays for math
@@ -411,8 +421,9 @@ class VideoProcessingThread(QThread):
 
             # Optionally draw fly ID label near its position
             if self.draw_labels:
-                cv2.putText(frame, str(fly_id), (x + 10, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, label_color, 2, cv2.LINE_AA)
+                cv2.putText(frame, str(fly_id), (x + self.label_offset, y - self.label_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, self.font_scale, label_color, self.font_thickness, cv2.LINE_AA)
+
 
 
     def draw_interaction_groups(self, frame, frame_idx, interactions, transformed_positions):
@@ -492,7 +503,7 @@ class VideoProcessingThread(QThread):
                         max_distance = distance
 
             if max_distance <= 300:
-                margin = 60  # Padding around box
+                margin = self.bounding_box_margin   
                 min_x_box = max(0, int(min_x - margin))
                 max_x_box = min(frame.shape[1], int(max_x + margin))
                 min_y_box = max(0, int(min_y - margin))
@@ -508,5 +519,5 @@ class VideoProcessingThread(QThread):
                     box_color = (0, 0, 255)  # Red
 
                 # Draw the rectangle for the group
-                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, 3)
+                cv2.rectangle(frame, (min_x_box, min_y_box), (max_x_box, max_y_box), box_color, self.box_thickness)
 
